@@ -1,0 +1,18 @@
+fastapi==0.111.0
+pydantic-settings==2.3.3
+uvicorn[standard]==0.30.1
+sqlalchemy==2.0.30
+aiosqlite==0.20.0
+python-multipart==0.0.9
+python-dotenv==1.0.1
+pillow==10.3.0
+numpy==1.26.4
+scipy==1.13.1
+
+# Azure Blob Storage (used when USE_AZURE_STORAGE=true)
+azure-storage-blob==12.20.0
+
+# YOLO / PyTorch inference
+# ultralytics installs torch automatically; pin to a CPU-only wheel for servers
+# without a GPU. Comment out and install separately if you already have a GPU env.
+ultralytics==8.2.24

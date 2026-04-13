@@ -8,4 +8,17 @@ We aim to implement a website allowing for these functions:
 7. Tying the human labels with the pts proposal distribution for the purpose of generating an estimate.
 8. A graph showing the estimated number of objects vs the number of labelled tiles. Similarly show the standard error. First graph should be noisier and converge on a number eventually. Second graph should approach 0.
 9. Should link to the research or give credit to initial authors.
-10. Export to excel or something would be cool.
+10. (Optional)Export to excel or something would be cool.
+
+
+Run Instructions:
+# Backend
+cd backend
+pip install -r requirements.txt
+cp .env.example .env   # edit as needed
+python run.py
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev
