@@ -16,9 +16,17 @@ Run Instructions:
 cd backend
 pip install -r requirements.txt
 cp .env.example .env   # edit as needed
+# then open .env and paste in the two Azure values from you
+# aka the connection string and name
 python run.py
 
 # Frontend (separate terminal)
 cd frontend
 npm install
 npm run dev
+
+
+
+
+
+# then open .env and paste in the two Azure values from you
