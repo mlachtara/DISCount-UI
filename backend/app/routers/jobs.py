@@ -6,8 +6,9 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.auth import get_current_user
 from app.database import AsyncSessionLocal, get_db
-from app.models import CVModel, Job, JobImage, Label, Tile, UploadedImage
+from app.models import CVModel, Job, JobImage, Label, Tile, UploadedImage, User
 from app.schemas import JobCreate, JobOut, TileOut
 from app.services import detector as detector_service
 from app.services import storage as storage_service
@@ -22,24 +23,31 @@ async def create_job(
     body: JobCreate,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Create a job, attach images, then launch the detector as a background task.
     """
-    # Validate model exists
-    model_result = await db.execute(select(CVModel).where(CVModel.id == body.model_id))
+    # Validate model belongs to this user
+    model_result = await db.execute(
+        select(CVModel).where(CVModel.id == body.model_id, CVModel.user_id == current_user.id)
+    )
     if model_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Validate images exist
+    # Validate images belong to this user
     for img_id in body.image_ids:
         img_result = await db.execute(
-            select(UploadedImage).where(UploadedImage.id == img_id)
+            select(UploadedImage).where(
+                UploadedImage.id == img_id,
+                UploadedImage.user_id == current_user.id,
+            )
         )
         if img_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=404, detail=f"Image {img_id} not found")
 
     job = Job(
+        user_id=current_user.id,
         name=body.name,
         description=body.description,
         model_id=body.model_id,
@@ -65,24 +73,37 @@ async def create_job(
 # ── List / get jobs ───────────────────────────────────────────────────────────
 
 @router.get("", response_model=list[JobOut])
-async def list_jobs(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Job).order_by(Job.created_at.desc()))
+async def list_jobs(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Job).where(Job.user_id == current_user.id).order_by(Job.created_at.desc())
+    )
     jobs = result.scalars().all()
     return [await _enrich_job(j, db) for j in jobs]
 
 
 @router.get("/{job_id}", response_model=JobOut)
-async def get_job(job_id: int, db: AsyncSession = Depends(get_db)):
-    job = await _fetch_job(job_id, db)
+async def get_job(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = await _fetch_job(job_id, current_user.id, db)
     return await _enrich_job(job, db)
 
 
 # ── Tile grid (overview) ──────────────────────────────────────────────────────
 
 @router.get("/{job_id}/tiles", response_model=list[TileOut])
-async def list_tiles(job_id: int, db: AsyncSession = Depends(get_db)):
+async def list_tiles(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Return all tiles for a job with label status and image serving URL."""
-    await _fetch_job(job_id, db)  # ensures job exists
+    await _fetch_job(job_id, current_user.id, db)  # ensures job exists and belongs to user
 
     result = await db.execute(
         select(Tile)
@@ -96,12 +117,16 @@ async def list_tiles(job_id: int, db: AsyncSession = Depends(get_db)):
 # ── Next tile to label ────────────────────────────────────────────────────────
 
 @router.get("/{job_id}/next-tile", response_model=TileOut | None)
-async def next_tile(job_id: int, db: AsyncSession = Depends(get_db)):
+async def next_tile(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Return the next tile the labeler should see, sampled ∝ g(s).
     Returns null when all tiles are labeled.
     """
-    job = await _fetch_job(job_id, db)
+    job = await _fetch_job(job_id, current_user.id, db)
     if job.status != "ready":
         raise HTTPException(
             status_code=409,
@@ -136,8 +161,10 @@ async def next_tile(job_id: int, db: AsyncSession = Depends(get_db)):
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-async def _fetch_job(job_id: int, db: AsyncSession) -> Job:
-    result = await db.execute(select(Job).where(Job.id == job_id))
+async def _fetch_job(job_id: int, user_id: int, db: AsyncSession) -> Job:
+    result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == user_id)
+    )
     job = result.scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")

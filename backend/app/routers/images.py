@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
 from app.database import get_db
-from app.models import UploadedImage
+from app.models import UploadedImage, User
 from app.schemas import ImageOut
 from app.services import storage as storage_service
 
@@ -22,6 +23,7 @@ MAX_FILE_SIZE_MB = 50
 async def upload_images(
     files: list[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Upload one or more image files (JPEG / PNG / TIFF)."""
     saved: list[ImageOut] = []
@@ -47,6 +49,7 @@ async def upload_images(
         stored_name, blob_url = storage_service.save_upload(data, file.filename or "image", "images")
 
         img = UploadedImage(
+            user_id=current_user.id,
             filename=stored_name,
             original_filename=file.filename or stored_name,
             blob_url=blob_url,
@@ -63,20 +66,34 @@ async def upload_images(
 
 
 @router.get("", response_model=list[ImageOut])
-async def list_images(db: AsyncSession = Depends(get_db)):
-    """List all uploaded images."""
+async def list_images(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List images uploaded by the current user."""
     result = await db.execute(
-        select(UploadedImage).order_by(UploadedImage.uploaded_at.desc())
+        select(UploadedImage)
+        .where(UploadedImage.user_id == current_user.id)
+        .order_by(UploadedImage.uploaded_at.desc())
     )
     return [ImageOut.model_validate(r) for r in result.scalars()]
 
 
 @router.get("/{image_id}/file")
-async def serve_image(image_id: int, db: AsyncSession = Depends(get_db)):
+async def serve_image(
+    image_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Serve the raw image bytes (used when local storage is active)."""
     from fastapi.responses import Response
 
-    result = await db.execute(select(UploadedImage).where(UploadedImage.id == image_id))
+    result = await db.execute(
+        select(UploadedImage).where(
+            UploadedImage.id == image_id,
+            UploadedImage.user_id == current_user.id,
+        )
+    )
     img = result.scalar_one_or_none()
     if img is None:
         raise HTTPException(status_code=404, detail="Image not found")

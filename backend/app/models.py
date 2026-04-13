@@ -21,12 +21,24 @@ from sqlalchemy.orm import relationship
 from app.database import Base
 
 
+class User(Base):
+    """A registered user account."""
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, nullable=False, unique=True, index=True)
+    hashed_password = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class UploadedImage(Base):
     """A single image file uploaded by the user (= one sample unit s)."""
 
     __tablename__ = "uploaded_images"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     filename = Column(String, nullable=False)           # unique stored filename
     original_filename = Column(String, nullable=False)  # user's original name
     blob_url = Column(String, nullable=False)           # Azure path or local path
@@ -42,6 +54,7 @@ class CVModel(Base):
     __tablename__ = "cv_models"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     name = Column(String, nullable=False)
     filename = Column(String, nullable=False)
     blob_url = Column(String, nullable=False)
@@ -69,6 +82,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     name = Column(String, nullable=False)
     description = Column(String, default="")
     model_id = Column(Integer, ForeignKey("cv_models.id"), nullable=False)

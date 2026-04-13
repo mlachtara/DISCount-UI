@@ -1,5 +1,11 @@
 // ── Mirrors backend Pydantic schemas ─────────────────────────────────────────
 
+export interface User {
+  id: number;
+  username: string;
+  created_at: string;
+}
+
 export interface ImageRecord {
   id: number;
   original_filename: string;

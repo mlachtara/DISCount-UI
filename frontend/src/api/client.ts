@@ -10,9 +10,42 @@ import type {
   Job,
   Label,
   Tile,
+  User,
 } from "../types";
 
 const BASE = "/api";
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export async function register(username: string, password: string): Promise<User> {
+  return json(
+    await fetch(`${BASE}/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    })
+  );
+}
+
+export async function login(username: string, password: string): Promise<User> {
+  return json(
+    await fetch(`${BASE}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    })
+  );
+}
+
+export async function logout(): Promise<void> {
+  await fetch(`${BASE}/auth/logout`, { method: "POST" });
+}
+
+export async function getMe(): Promise<User | null> {
+  const res = await fetch(`${BASE}/auth/me`);
+  if (res.status === 401) return null;
+  return json(res);
+}
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {

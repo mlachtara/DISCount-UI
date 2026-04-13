@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
 from app.database import get_db
-from app.models import EstimateHistory, Label, Tile
+from app.models import EstimateHistory, Job, Label, Tile, User
 from app.schemas import EstimateOut, LabelCreate, LabelOut
 from app.services.discount import compute_estimate
 
@@ -20,11 +21,19 @@ async def submit_label(
     job_id: int,
     body: LabelCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Record a human-provided count for a tile, then return the updated
     k-DISCOUNT estimate so the UI can update the live charts immediately.
     """
+    # Verify job belongs to this user
+    job_result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == current_user.id)
+    )
+    if job_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
     # Verify tile belongs to job
     tile_result = await db.execute(
         select(Tile).where(Tile.id == body.tile_id, Tile.job_id == job_id)
@@ -58,8 +67,19 @@ async def submit_label(
 
 
 @router.get("/{job_id}/labels", response_model=list[LabelOut])
-async def list_labels(job_id: int, db: AsyncSession = Depends(get_db)):
+async def list_labels(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Return all submitted labels for a job."""
+    # Verify job belongs to user
+    job_result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == current_user.id)
+    )
+    if job_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
     result = await db.execute(
         select(Label).where(Label.job_id == job_id).order_by(Label.labeled_at)
     )

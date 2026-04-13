@@ -12,6 +12,11 @@ scipy==1.13.1
 # Azure Blob Storage (used when USE_AZURE_STORAGE=true)
 azure-storage-blob==12.20.0
 
+# Authentication
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2          # passlib 1.7.4 is incompatible with bcrypt >= 4.0
+python-jose[cryptography]==3.3.0
+
 # YOLO / PyTorch inference
 # ultralytics installs torch automatically; pin to a CPU-only wheel for servers
 # without a GPU. Comment out and install separately if you already have a GPU env.

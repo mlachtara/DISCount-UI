@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     detector_confidence: float = 0.2
     detector_epsilon: float = 0.5
 
+    # Auth — change this to a long random string in production
+    secret_key: str = "change-me-in-production-use-a-long-random-string"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]
