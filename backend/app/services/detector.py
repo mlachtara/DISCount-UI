@@ -2,11 +2,17 @@
 Detector service — runs a YOLO .pt model on each image in a job and stores
 the resulting g(s) values (raw detection count + epsilon) in the Tile table.
 
+Supports image tiling: when a job has num_tiles > 1, each source image is split
+into a grid of (grid_rows × grid_cols) sub-tiles before inference.  Each sub-tile
+becomes an independent Tile row with its own crop stored in local/Azure storage.
+
 Runs synchronously inside a FastAPI BackgroundTask so it does not block the
 request thread.  For large jobs you can move this to Azure Functions / Celery.
 """
+import io
 import json
 import logging
+import math
 import tempfile
 from pathlib import Path
 
@@ -45,6 +51,47 @@ def _load_yolo(model_blob_url: str):
         Path(tmp_path).unlink(missing_ok=True)
 
     return _model_cache[model_blob_url]
+
+
+# ── Tiling helpers ────────────────────────────────────────────────────────────
+
+def _compute_grid(num_tiles: int) -> tuple[int, int]:
+    """
+    Return (grid_rows, grid_cols) whose product is >= num_tiles, keeping the
+    grid as close to square as possible.
+
+    Examples:
+        1   → (1, 1)   – no tiling
+        4   → (2, 2)
+        10  → (3, 4)   – 12 cells, closest to square that fits 10
+        1000 → (32, 32) – 1024 cells
+    """
+    if num_tiles <= 1:
+        return (1, 1)
+    cols = math.ceil(math.sqrt(num_tiles))
+    rows = math.ceil(num_tiles / cols)
+    return (rows, cols)
+
+
+def _crop_tile(image_bytes: bytes, row: int, col: int, grid_rows: int, grid_cols: int) -> bytes:
+    """
+    Crop a sub-tile from raw image bytes and return it as JPEG bytes.
+    Coordinates are computed by evenly dividing the image into the grid.
+    """
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    w, h = img.size
+    tile_w = w / grid_cols
+    tile_h = h / grid_rows
+    left   = int(col * tile_w)
+    top    = int(row * tile_h)
+    right  = int((col + 1) * tile_w)
+    bottom = int((row + 1) * tile_h)
+    crop = img.crop((left, top, right, bottom))
+    buf = io.BytesIO()
+    crop.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
 
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
@@ -123,30 +170,67 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
         images = images_result.scalars().all()
         log.info("Job %d: found %d image(s) to process", job_id, len(images))
 
+        num_tiles = job.num_tiles or 1
+        grid_rows, grid_cols = _compute_grid(num_tiles)
+        tiling = grid_rows > 1 or grid_cols > 1
+        tile_count = 0
+
         for image in images:
             log.debug("Job %d: processing image %d (%s)", job_id, image.id, image.original_filename)
             image_bytes = storage_service.get_file_bytes(image.blob_url)
-            inference = _run_inference(yolo, image_bytes)
 
-            g_raw = float(inference["count"])
-            # epsilon is a minimum floor: g(s) = max(raw_count, epsilon)
-            # This ensures every tile has a non-zero sampling probability even
-            # when the detector finds nothing, without inflating tiles that do
-            # have detections.
-            g_with_eps = max(g_raw, epsilon)
+            if not tiling:
+                # ── No tiling: run detector on the full image ──
+                inference = _run_inference(yolo, image_bytes)
+                g_raw = float(inference["count"])
+                g_with_eps = max(g_raw, epsilon)
+                tile = Tile(
+                    job_id=job_id,
+                    image_id=image.id,
+                    g_count=g_with_eps,
+                    g_count_raw=g_raw,
+                    detections_json=json.dumps(inference["detections"]),
+                    tile_row=0,
+                    tile_col=0,
+                    grid_rows=1,
+                    grid_cols=1,
+                )
+                db.add(tile)
+                tile_count += 1
+            else:
+                # ── Tiling: split image into grid, run detector on each crop ──
+                stem = Path(image.original_filename).stem
+                for row in range(grid_rows):
+                    for col in range(grid_cols):
+                        crop_bytes = _crop_tile(image_bytes, row, col, grid_rows, grid_cols)
+                        inference = _run_inference(yolo, crop_bytes)
+                        g_raw = float(inference["count"])
+                        g_with_eps = max(g_raw, epsilon)
 
-            tile = Tile(
-                job_id=job_id,
-                image_id=image.id,
-                g_count=g_with_eps,
-                g_count_raw=g_raw,
-                detections_json=json.dumps(inference["detections"]),
-            )
-            db.add(tile)
+                        # Save crop to storage so the frontend can display it
+                        crop_name = f"{stem}_r{row}_c{col}.jpg"
+                        _, crop_blob_url = storage_service.save_upload(
+                            crop_bytes, crop_name, "tiles"
+                        )
+
+                        tile = Tile(
+                            job_id=job_id,
+                            image_id=image.id,
+                            g_count=g_with_eps,
+                            g_count_raw=g_raw,
+                            detections_json=json.dumps(inference["detections"]),
+                            crop_blob_url=crop_blob_url,
+                            tile_row=row,
+                            tile_col=col,
+                            grid_rows=grid_rows,
+                            grid_cols=grid_cols,
+                        )
+                        db.add(tile)
+                        tile_count += 1
 
         job.status = "ready"
         await db.commit()
-        log.info("Job %d finished processing (%d tiles)", job_id, len(images))
+        log.info("Job %d finished processing (%d tiles, grid %dx%d)", job_id, tile_count, grid_rows, grid_cols)
 
     except Exception as exc:
         log.exception("Detector failed for job %d", job_id)

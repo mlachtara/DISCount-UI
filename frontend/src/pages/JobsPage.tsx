@@ -28,6 +28,7 @@ export default function JobsPage() {
   const [modelId, setModelId] = useState<number | "">("");
   const [selectedImages, setSelectedImages] = useState<Set<number>>(new Set());
   const [epsilon, setEpsilon] = useState(0.5);
+  const [numTiles, setNumTiles] = useState(1);
   const [creating, setCreating] = useState(false);
   const [formError, setFormError] = useState("");
 
@@ -62,6 +63,7 @@ export default function JobsPage() {
         model_id: Number(modelId),
         image_ids: [...selectedImages],
         epsilon,
+        num_tiles: Math.max(1, numTiles),
       });
       navigate(`/jobs/${job.id}`);
     } catch (err) {
@@ -196,6 +198,31 @@ export default function JobsPage() {
               className="w-32 border border-gray-300 rounded-md px-3 py-2 text-sm
                          focus:outline-none focus:ring-2 focus:ring-brand-400"
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Tiles per image
+            </label>
+            <input
+              type="number"
+              value={numTiles}
+              min={1}
+              step={1}
+              onChange={(e) => setNumTiles(Math.max(1, parseInt(e.target.value) || 1))}
+              className="w-32 border border-gray-300 rounded-md px-3 py-2 text-sm
+                         focus:outline-none focus:ring-2 focus:ring-brand-400"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              {numTiles <= 1
+                ? "Each image is labeled as a single tile."
+                : (() => {
+                    const cols = Math.ceil(Math.sqrt(numTiles));
+                    const rows = Math.ceil(numTiles / cols);
+                    return `Each image will be split into a ${rows}×${cols} grid (${rows * cols} tiles). Useful when a single image contains thousands of objects.`;
+                  })()
+              }
+            </p>
           </div>
 
           {/* Image selector */}

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
-from app.database import create_all_tables
+from app.database import create_all_tables, engine
 from app.routers import cv_models, estimates, images, jobs, labels
 
 settings = get_settings()
@@ -45,9 +45,33 @@ if not settings.use_azure_storage:
     app.mount("/static", StaticFiles(directory=str(local_path)), name="static")
 
 # ── Startup ───────────────────────────────────────────────────────────────────
+
+async def _run_migrations() -> None:
+    """
+    Safely apply schema migrations that create_all() can't handle
+    (adding columns to existing tables).  Each statement is wrapped in its
+    own try/except so a column that already exists doesn't abort the rest.
+    """
+    new_columns = [
+        "ALTER TABLE jobs  ADD COLUMN num_tiles   INTEGER DEFAULT 1",
+        "ALTER TABLE tiles ADD COLUMN crop_blob_url VARCHAR",
+        "ALTER TABLE tiles ADD COLUMN tile_row    INTEGER DEFAULT 0",
+        "ALTER TABLE tiles ADD COLUMN tile_col    INTEGER DEFAULT 0",
+        "ALTER TABLE tiles ADD COLUMN grid_rows   INTEGER DEFAULT 1",
+        "ALTER TABLE tiles ADD COLUMN grid_cols   INTEGER DEFAULT 1",
+    ]
+    async with engine.begin() as conn:
+        for stmt in new_columns:
+            try:
+                await conn.execute(__import__("sqlalchemy").text(stmt))
+            except Exception:
+                pass  # column already exists — skip
+
+
 @app.on_event("startup")
 async def on_startup():
     await create_all_tables()
+    await _run_migrations()
 
 
 @app.get("/api/health")

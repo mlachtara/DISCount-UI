@@ -295,6 +295,14 @@ export default function LabelPage() {
             </p>
           )}
 
+          {/* Tile position badge (only shown when image is tiled) */}
+          {tile && !loadingTile && tile.grid_rows * tile.grid_cols > 1 && (
+            <p className="text-xs text-center font-medium text-brand-700 bg-brand-50 rounded px-2 py-1">
+              Tile row {tile.tile_row + 1}/{tile.grid_rows}, col {tile.tile_col + 1}/{tile.grid_cols}
+              &nbsp;&mdash;&nbsp;{tile.grid_rows}&times;{tile.grid_cols} grid
+            </p>
+          )}
+
           {/* Detector info */}
           {tile && !loadingTile && (
             <p className="text-xs text-gray-400 text-center">

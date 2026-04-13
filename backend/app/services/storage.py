@@ -109,10 +109,18 @@ def _save_azure(file_data: bytes, stored_filename: str, folder: str) -> tuple[st
 
 
 def _get_azure(blob_url: str) -> bytes:
-    from azure.storage.blob import BlobClient
+    from urllib.parse import urlparse
+    from azure.storage.blob import BlobServiceClient
 
-    client = BlobClient.from_blob_url(
-        blob_url,
-        connection_string=settings.azure_storage_connection_string,
+    # Parse container name and blob path out of the public URL
+    # URL shape: https://<account>.blob.core.windows.net/<container>/<blob_path>
+    parsed = urlparse(blob_url)
+    parts = parsed.path.lstrip("/").split("/", 1)
+    container_name = parts[0]
+    blob_name = parts[1]
+
+    service = BlobServiceClient.from_connection_string(
+        settings.azure_storage_connection_string
     )
-    return client.download_blob().readall()
+    blob_client = service.get_blob_client(container=container_name, blob=blob_name)
+    return blob_client.download_blob().readall()

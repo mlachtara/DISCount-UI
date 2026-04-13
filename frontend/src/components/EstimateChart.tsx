@@ -28,17 +28,19 @@ export default function EstimateChart({ history }: Props) {
     );
   }
 
-  const data = history.map((h) => ({
-    n: h.n_labeled,
-    estimate: +h.estimate.toFixed(2),
-    ci_lower: h.ci_lower != null ? +h.ci_lower.toFixed(2) : null,
-    ci_upper: h.ci_upper != null ? +h.ci_upper.toFixed(2) : null,
-    // recharts Area needs [lower, upper] as a range
-    ciRange:
-      h.ci_lower != null && h.ci_upper != null
-        ? [+h.ci_lower.toFixed(2), +h.ci_upper.toFixed(2)]
-        : null,
-  }));
+  // Recharts Area expects either [lower, upper] or the key to be absent.
+  // Passing null crashes when it tries to destructure the range pair, so we
+  // omit ciRange entirely for points that don't have a CI yet (n < 2).
+  const data = history.map((h) => {
+    const point: Record<string, unknown> = {
+      n: h.n_labeled,
+      estimate: +h.estimate.toFixed(2),
+    };
+    if (h.ci_lower != null && h.ci_upper != null) {
+      point.ciRange = [+h.ci_lower.toFixed(2), +h.ci_upper.toFixed(2)];
+    }
+    return point;
+  });
 
   return (
     <ResponsiveContainer width="100%" height={280}>

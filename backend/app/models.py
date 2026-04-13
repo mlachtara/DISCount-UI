@@ -75,6 +75,7 @@ class Job(Base):
     # Job status values: "created" | "processing" | "ready" | "error"
     status = Column(String, default="created", nullable=False)
     epsilon = Column(Float, default=0.5)  # minimum floor for g(s): g(s) = max(raw_count, epsilon)
+    num_tiles = Column(Integer, default=1)  # target number of sub-tiles to split each image into
     created_at = Column(DateTime, default=datetime.utcnow)
     error_message = Column(Text, nullable=True)
 
@@ -104,6 +105,12 @@ class Tile(Base):
     g_count = Column(Float, nullable=False)       # g(s) + epsilon
     g_count_raw = Column(Float, nullable=False)   # raw detection count
     detections_json = Column(Text, default="[]")  # list of {x1,y1,x2,y2,confidence,class_id}
+    # Tiling metadata (grid_rows=1, grid_cols=1 means no tiling — full image)
+    crop_blob_url = Column(String, nullable=True)   # stored path/URL for the cropped sub-tile image
+    tile_row = Column(Integer, default=0)           # 0-based row index in the grid
+    tile_col = Column(Integer, default=0)           # 0-based column index in the grid
+    grid_rows = Column(Integer, default=1)          # total rows in this job's grid
+    grid_cols = Column(Integer, default=1)          # total columns in this job's grid
 
     job = relationship("Job", back_populates="tiles")
     image = relationship("UploadedImage")

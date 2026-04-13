@@ -55,6 +55,7 @@ export async function createJob(body: {
   model_id: number;
   image_ids: number[];
   epsilon: number;
+  num_tiles: number;
 }): Promise<Job> {
   return json(
     await fetch(`${BASE}/jobs`, {

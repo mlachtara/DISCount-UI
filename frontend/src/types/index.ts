@@ -39,7 +39,11 @@ export interface Tile {
   g_count_raw: number;
   detections_json: string;  // JSON-encoded Detection[]
   is_labeled: boolean;
-  image_url: string;
+  image_url: string;        // cropped sub-tile URL (or full image when not tiled)
+  tile_row: number;         // 0-based row index in the grid
+  tile_col: number;         // 0-based column index in the grid
+  grid_rows: number;        // total rows (1 = not tiled)
+  grid_cols: number;        // total columns (1 = not tiled)
 }
 
 export interface Detection {

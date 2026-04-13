@@ -46,6 +46,7 @@ async def create_job(
         description=body.description,
         model_id=body.model_id,
         epsilon=body.epsilon,
+        num_tiles=max(1, body.num_tiles),
         status="processing",
     )
     db.add(job)
@@ -173,7 +174,9 @@ def _job_out(job: Job, total_tiles: int, labeled_tiles: int) -> JobOut:
 
 
 def _tile_out(tile: Tile) -> TileOut:
-    url = storage_service.get_serving_url(tile.image.blob_url)
+    # Use the cropped sub-tile image when available; fall back to the full image.
+    blob = tile.crop_blob_url if tile.crop_blob_url else tile.image.blob_url
+    url = storage_service.get_serving_url(blob)
     return TileOut(
         id=tile.id,
         job_id=tile.job_id,
@@ -183,6 +186,10 @@ def _tile_out(tile: Tile) -> TileOut:
         detections_json=tile.detections_json,
         is_labeled=tile.label is not None,
         image_url=url,
+        tile_row=tile.tile_row or 0,
+        tile_col=tile.tile_col or 0,
+        grid_rows=tile.grid_rows or 1,
+        grid_cols=tile.grid_cols or 1,
     )
 
 
