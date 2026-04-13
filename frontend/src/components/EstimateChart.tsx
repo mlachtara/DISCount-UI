@@ -1,6 +1,9 @@
 /**
  * Line chart: estimated count ± 95% CI vs. number of labeled tiles.
  * The estimate starts noisy and converges as more tiles are labeled.
+ *
+ * CI band is rendered using two stacked Areas (base = ci_lower, delta =
+ * ci_upper - ci_lower) to avoid the buggy array-value dataKey trick.
  */
 import {
   Area,
@@ -28,19 +31,20 @@ export default function EstimateChart({ history }: Props) {
     );
   }
 
-  // Recharts Area expects either [lower, upper] or the key to be absent.
-  // Passing null crashes when it tries to destructure the range pair, so we
-  // omit ciRange entirely for points that don't have a CI yet (n < 2).
   const data = history.map((h) => {
     const point: Record<string, unknown> = {
       n: h.n_labeled,
       estimate: +h.estimate.toFixed(2),
     };
     if (h.ci_lower != null && h.ci_upper != null) {
-      point.ciRange = [+h.ci_lower.toFixed(2), +h.ci_upper.toFixed(2)];
+      point.ci_lower = +h.ci_lower.toFixed(2);
+      // delta is rendered as a stacked band on top of ci_lower
+      point.ci_delta = +(h.ci_upper - h.ci_lower).toFixed(2);
     }
     return point;
   });
+
+  const hasCi = data.some((d) => d.ci_lower != null);
 
   return (
     <ResponsiveContainer width="100%" height={280}>
@@ -54,24 +58,39 @@ export default function EstimateChart({ history }: Props) {
         <YAxis tick={{ fontSize: 11 }} width={55} />
         <Tooltip
           formatter={(v: number, name: string) => {
-            if (name === "ciRange") return null;
+            if (name === "ci_lower" || name === "ci_delta") return null;
             return [v.toFixed(1), name === "estimate" ? "Estimate" : name];
           }}
         />
         <Legend verticalAlign="top" height={28} />
 
-        {/* 95% CI shaded band */}
-        <Area
-          dataKey="ciRange"
-          name="95% CI"
-          fill="#93c5fd"
-          stroke="none"
-          fillOpacity={0.4}
-          connectNulls
-          dot={false}
-          activeDot={false}
-          legendType="rect"
-        />
+        {/* 95% CI shaded band — two stacked areas avoids the array-value bug */}
+        {hasCi && (
+          <>
+            <Area
+              dataKey="ci_lower"
+              stackId="ci"
+              fill="transparent"
+              stroke="none"
+              connectNulls
+              dot={false}
+              activeDot={false}
+              legendType="none"
+            />
+            <Area
+              dataKey="ci_delta"
+              stackId="ci"
+              name="95% CI"
+              fill="#93c5fd"
+              stroke="none"
+              fillOpacity={0.4}
+              connectNulls
+              dot={false}
+              activeDot={false}
+              legendType="rect"
+            />
+          </>
+        )}
 
         {/* Estimate line */}
         <Line

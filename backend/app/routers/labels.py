@@ -70,20 +70,19 @@ async def list_labels(job_id: int, db: AsyncSession = Depends(get_db)):
 
 async def _recompute_and_store(job_id: int, db: AsyncSession) -> EstimateOut:
     """Compute the k-DISCOUNT estimate and persist a history snapshot."""
-    # All tiles
-    all_tiles_result = await db.execute(
-        select(Tile).where(Tile.job_id == job_id)
+    # Fetch only g_count — no need to materialise full ORM objects for 1000s of tiles
+    g_result = await db.execute(
+        select(Tile.g_count).where(Tile.job_id == job_id)
     )
-    all_tiles = all_tiles_result.scalars().all()
-    all_g = [t.g_count for t in all_tiles]
+    all_g = [row[0] for row in g_result.all()]
 
-    # All labels (including the one just added)
+    # All labels (including the one just added) joined to get g(s) for each
     labels_result = await db.execute(
-        select(Label, Tile)
+        select(Label.f_count, Tile.g_count)
         .join(Tile, Label.tile_id == Tile.id)
         .where(Label.job_id == job_id)
     )
-    pairs = [(tile.g_count, label.f_count) for label, tile in labels_result]
+    pairs = [(g, f) for f, g in labels_result.all()]
 
     est = compute_estimate(all_g, pairs)
 

@@ -93,6 +93,9 @@ export default function LabelPage() {
   // fCount tracks the authoritative count; driven by points or manual input
   const [fCount, setFCount] = useState<number | "">(0);
 
+  // ── Bounding box toggle ──
+  const [showBoxes, setShowBoxes] = useState(false);
+
   // ── Estimate / history ──
   const [estimate, setEstimate] = useState<EstimateOut | null>(null);
   const [history, setHistory] = useState<EstimateHistoryPoint[]>([]);
@@ -111,13 +114,13 @@ export default function LabelPage() {
     }
   })();
 
-  // ── Redraw canvas whenever points or tile changes ──
+  // ── Redraw canvas whenever points, tile, or box-visibility changes ──
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     const img = imgRef.current;
     if (!canvas || !img || !img.complete || !img.naturalWidth) return;
-    drawOverlay(canvas, img, detections, points);
-  }, [tile?.id, points]); // detections derived from tile
+    drawOverlay(canvas, img, showBoxes ? detections : [], points);
+  }, [tile?.id, points, showBoxes]); // detections derived from tile
 
   useEffect(() => {
     redraw();
@@ -254,6 +257,25 @@ export default function LabelPage() {
         <div className="space-y-3">
           {/* Tile viewer */}
           <div className="card p-2">
+            {/* Bounding box toggle */}
+            {tile && !loadingTile && !done && (
+              <div className="flex justify-end mb-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowBoxes((v) => !v)}
+                  className={`text-xs px-2 py-1 rounded border transition-colors ${
+                    showBoxes
+                      ? "bg-yellow-100 border-yellow-400 text-yellow-800"
+                      : "bg-gray-100 border-gray-300 text-gray-600 hover:bg-gray-200"
+                  }`}
+                >
+                  {showBoxes ? "Hide" : "Show"} detector boxes
+                  <span className="ml-1.5 font-semibold">
+                    ({tile.g_count_raw.toFixed(0)} found)
+                  </span>
+                </button>
+              </div>
+            )}
             {loadingTile ? (
               <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
                 Loading tile…
@@ -306,10 +328,7 @@ export default function LabelPage() {
           {/* Detector info */}
           {tile && !loadingTile && (
             <p className="text-xs text-gray-400 text-center">
-              Detector proposals:{" "}
-              <strong className="text-gray-600">{tile.g_count_raw.toFixed(0)}</strong>{" "}
-              &nbsp;·&nbsp; g(s) ={" "}
-              <strong className="text-gray-600">{tile.g_count.toFixed(3)}</strong>
+              g(s) = <strong className="text-gray-600">{tile.g_count.toFixed(3)}</strong>
             </p>
           )}
 

@@ -1,10 +1,8 @@
 """
 /api/jobs — create, list, and inspect counting jobs.
 """
-import json
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -110,21 +108,23 @@ async def next_tile(job_id: int, db: AsyncSession = Depends(get_db)):
             detail=f"Job is not ready for labeling (status: {job.status})",
         )
 
-    result = await db.execute(
-        select(Tile)
+    # Query only the columns we need for sampling — avoids materialising
+    # thousands of full ORM objects (including large detections_json blobs)
+    # just to discover which tiles are still unlabeled.
+    unlabeled_result = await db.execute(
+        select(Tile.id, Tile.g_count)
         .where(Tile.job_id == job_id)
-        .options(selectinload(Tile.label), selectinload(Tile.image))
+        .where(~exists().where(Label.tile_id == Tile.id))
     )
-    all_tiles = result.scalars().all()
-    unlabeled = [t for t in all_tiles if t.label is None]
+    unlabeled = unlabeled_result.all()
 
     if not unlabeled:
         return None  # all done
 
-    candidates = [{"id": t.id, "g_count": t.g_count} for t in unlabeled]
+    candidates = [{"id": row.id, "g_count": row.g_count} for row in unlabeled]
     chosen = detector_service.sample_next_tile(candidates)
 
-    # Fetch full tile with relationships
+    # Fetch only the chosen tile with its relationships
     tile_result = await db.execute(
         select(Tile)
         .where(Tile.id == chosen["id"])
