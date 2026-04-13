@@ -9,12 +9,15 @@ becomes an independent Tile row with its own crop stored in local/Azure storage.
 Runs synchronously inside a FastAPI BackgroundTask so it does not block the
 request thread.  For large jobs you can move this to Azure Functions / Celery.
 """
+import asyncio
 import io
 import json
 import logging
 import math
 import tempfile
 from pathlib import Path
+
+from PIL import Image as PILImage
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,14 +76,11 @@ def _compute_grid(num_tiles: int) -> tuple[int, int]:
     return (rows, cols)
 
 
-def _crop_tile(image_bytes: bytes, row: int, col: int, grid_rows: int, grid_cols: int) -> bytes:
+def _crop_tile(img, row: int, col: int, grid_rows: int, grid_cols: int) -> bytes:
     """
-    Crop a sub-tile from raw image bytes and return it as JPEG bytes.
-    Coordinates are computed by evenly dividing the image into the grid.
+    Crop a sub-tile from an already-open PIL Image and return JPEG bytes.
+    Accepts a PIL Image so the caller can open the source image once and reuse it.
     """
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     w, h = img.size
     tile_w = w / grid_cols
     tile_h = h / grid_rows
@@ -102,10 +102,8 @@ def _run_inference(yolo_model, image_bytes: bytes) -> dict:
     Returns {"count": int, "detections": [{x1,y1,x2,y2,confidence,class_id}, ...]}
     """
     import numpy as np
-    from PIL import Image
-    import io
 
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
     img_array = np.array(img)
 
     results = yolo_model(
@@ -134,6 +132,9 @@ def _run_inference(yolo_model, image_bytes: bytes) -> dict:
 
 # ── Main background task ──────────────────────────────────────────────────────
 
+_FLUSH_EVERY = 50  # flush the ORM session every N tiles to avoid unbounded memory growth
+
+
 async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
     """
     Background task: for every image in the job, run the detector and create
@@ -156,7 +157,8 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
         return
 
     try:
-        yolo = _load_yolo(job.model.blob_url)
+        # _load_yolo is blocking (disk I/O + PyTorch model load) — run off-thread
+        yolo = await asyncio.to_thread(_load_yolo, job.model.blob_url)
         epsilon = job.epsilon
 
         # Load images via a direct join rather than the ORM relationship to avoid
@@ -177,11 +179,12 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
 
         for image in images:
             log.debug("Job %d: processing image %d (%s)", job_id, image.id, image.original_filename)
-            image_bytes = storage_service.get_file_bytes(image.blob_url)
+            # File I/O is blocking — run off event-loop thread
+            image_bytes = await asyncio.to_thread(storage_service.get_file_bytes, image.blob_url)
 
             if not tiling:
                 # ── No tiling: run detector on the full image ──
-                inference = _run_inference(yolo, image_bytes)
+                inference = await asyncio.to_thread(_run_inference, yolo, image_bytes)
                 g_raw = float(inference["count"])
                 g_with_eps = max(g_raw, epsilon)
                 tile = Tile(
@@ -199,18 +202,25 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
                 tile_count += 1
             else:
                 # ── Tiling: split image into grid, run detector on each crop ──
+                # Open the source image once; _crop_tile reuses this object.
+                pil_img = await asyncio.to_thread(
+                    lambda b: PILImage.open(io.BytesIO(b)).convert("RGB"), image_bytes
+                )
                 stem = Path(image.original_filename).stem
                 for row in range(grid_rows):
                     for col in range(grid_cols):
-                        crop_bytes = _crop_tile(image_bytes, row, col, grid_rows, grid_cols)
-                        inference = _run_inference(yolo, crop_bytes)
+                        # CPU-bound: crop + YOLO inference — keep event loop free
+                        crop_bytes = await asyncio.to_thread(
+                            _crop_tile, pil_img, row, col, grid_rows, grid_cols
+                        )
+                        inference = await asyncio.to_thread(_run_inference, yolo, crop_bytes)
                         g_raw = float(inference["count"])
                         g_with_eps = max(g_raw, epsilon)
 
-                        # Save crop to storage so the frontend can display it
+                        # Disk I/O: save the crop file — also off-thread
                         crop_name = f"{stem}_r{row}_c{col}.jpg"
-                        _, crop_blob_url = storage_service.save_upload(
-                            crop_bytes, crop_name, "tiles"
+                        _, crop_blob_url = await asyncio.to_thread(
+                            storage_service.save_upload, crop_bytes, crop_name, "tiles"
                         )
 
                         tile = Tile(
@@ -227,6 +237,12 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
                         )
                         db.add(tile)
                         tile_count += 1
+
+                        # Periodically flush to avoid accumulating thousands of
+                        # ORM objects in memory for large grids.
+                        if tile_count % _FLUSH_EVERY == 0:
+                            await db.flush()
+                            log.debug("Job %d: flushed after %d tiles", job_id, tile_count)
 
         job.status = "ready"
         await db.commit()
