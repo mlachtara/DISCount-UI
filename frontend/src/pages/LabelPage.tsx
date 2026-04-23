@@ -20,7 +20,7 @@ import type { Detection, EstimateHistoryPoint, EstimateOut, Job, Tile } from "..
 // ── Canvas drawing ────────────────────────────────────────────────────────────
 
 interface Point {
-  x: number; // in natural image pixel coordinates
+  x: number; // in natural image pixel coordinates, Cartesian
   y: number;
 }
 
@@ -49,22 +49,22 @@ function drawOverlay(
     const fontSize = Math.max(10, canvas.width / 70);
     ctx.font = `bold ${fontSize}px sans-serif`;
     const tw = ctx.measureText(label).width + 6;
-    ctx.fillStyle = "rgba(250, 204, 21, 0.85)";
+    ctx.fillStyle = "rgba(245, 2, 2, 0.4)";
     ctx.fillRect(d.x1, d.y1 - fontSize - 4, tw, fontSize + 4);
     ctx.fillStyle = "#1c1917";
     ctx.fillText(label, d.x1 + 3, d.y1 - 4);
   }
 
   // ── Human click-points (green numbered circles) ──
-  const r = Math.max(10, canvas.width / 60);
+  const r = Math.max(7, canvas.width / 100);
   for (let i = 0; i < points.length; i++) {
     const { x, y } = points[i];
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(34, 197, 94, 0.85)";
+    ctx.fillStyle = "rgba(47, 112, 231, 0.85)";
     ctx.fill();
     ctx.strokeStyle = "white";
-    ctx.lineWidth = lw * 1.5;
+    ctx.lineWidth = lw * .5;
     ctx.stroke();
 
     ctx.fillStyle = "white";
@@ -118,6 +118,25 @@ export default function LabelPage() {
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     const img = imgRef.current;
+
+    const hist= getEstimateHistory(job?.id ?? 0);
+  
+    Promise.resolve(hist).then((res) =>{
+            if(res.length > 0){
+              const lastEst = res[res.length -1];
+            setEstimate({
+              "estimate" : lastEst.estimate,
+              "job_id": id,
+              "n_labeled": lastEst.n_labeled,
+              "ci_lower" : lastEst.ci_lower,
+              "ci_upper" : lastEst.ci_upper,
+              "total_tiles" : job?.total_tiles ?? 1,
+              "std_error" : lastEst.std_error,
+              "g_total" : job?.epsilon ?? 1
+            });
+            }
+          })
+          
     if (!canvas || !img || !img.complete || !img.naturalWidth) return;
     drawOverlay(canvas, img, showBoxes ? detections : [], points);
   }, [tile?.id, points, showBoxes]); // detections derived from tile
@@ -132,7 +151,8 @@ export default function LabelPage() {
     getJob(id).then(setJob).catch((e) => setError(String(e)));
     loadNextTile();
     getEstimateHistory(id).then(setHistory);
-  }, [id]);
+
+    }, [id]);
 
   async function loadNextTile() {
     setLoadingTile(true);
@@ -428,7 +448,7 @@ export default function LabelPage() {
             </div>
           ) : (
             <div className="card text-center text-sm text-gray-400 py-6">
-              Submit your first label to see the estimate.
+              Submit your first label to see the estimate 
             </div>
           )}
 
