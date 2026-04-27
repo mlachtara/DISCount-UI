@@ -120,7 +120,7 @@ export default function LabelPage() {
     const img = imgRef.current;
 
     const hist= getEstimateHistory(job?.id ?? 0);
-  
+    
     Promise.resolve(hist).then((res) =>{
             if(res.length > 0){
               const lastEst = res[res.length -1];

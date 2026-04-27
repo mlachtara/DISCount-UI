@@ -30,3 +30,22 @@ npm run dev
 
 
 # then open .env and paste in the two Azure values from you
+
+
+
+
+TODO:
+Need to change the username password database to be in azure/ long term solution
+
+Need to send the job data to the database/ long term solution
+
+Need to implement rate limits with this. Consider running model on azure?
+
+Need to label the other domains
+
+Need to deploy.
+
+Need to make a video explaining the process.
+
+Need to fix the YOLO detector training system. Possibly roll it all together?
+
