@@ -94,6 +94,19 @@ async def get_job(
     return await _enrich_job(job, db)
 
 
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete one job and all cascade-linked artifacts."""
+    job = await _fetch_job(job_id, current_user.id, db)
+    await db.delete(job)
+    await db.commit()
+    return None
+
+
 # ── Tile grid (overview) ──────────────────────────────────────────────────────
 
 @router.get("/{job_id}/tiles", response_model=list[TileOut])
@@ -197,6 +210,10 @@ def _job_out(job: Job, total_tiles: int, labeled_tiles: int) -> JobOut:
         error_message=job.error_message,
         total_tiles=total_tiles,
         labeled_tiles=labeled_tiles,
+        yolo_finetune_status=getattr(job, "yolo_finetune_status", "idle") or "idle",
+        yolo_finetune_error=getattr(job, "yolo_finetune_error", None),
+        yolo_last_trained_bbox_count=getattr(job, "yolo_last_trained_bbox_count", 0) or 0,
+        yolo_latest_model_id=getattr(job, "yolo_latest_model_id", None),
     )
 
 

@@ -75,7 +75,7 @@ export default function UploadPage() {
         <h2 className="font-semibold text-gray-800">Image tiles</h2>
         <p className="text-sm text-gray-500">
           Upload JPEG, PNG, or TIFF files. Each file is one sample unit <em>s</em> in
-          the DISCOUNT framework. Max 50 MB per file.
+          the DISCOUNT framework. Max 150 MB per file.
         </p>
 
         <div

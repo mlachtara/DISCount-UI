@@ -3,7 +3,7 @@
  */
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { createJob, listImages, listJobs, listModels } from "../api/client";
+import { createJob, deleteJob, listImages, listJobs, listModels } from "../api/client";
 import type { CVModelRecord, ImageRecord, Job } from "../types";
 
 function StatusBadge({ status }: { status: Job["status"] }) {
@@ -16,11 +16,31 @@ function StatusBadge({ status }: { status: Job["status"] }) {
   return <span className={cls[status] ?? "badge"}>{status}</span>;
 }
 
+function FineTuneBadge({ status }: { status: Job["yolo_finetune_status"] }) {
+  const cls =
+    status === "running"
+      ? "inline-flex items-center rounded-full bg-purple-100 text-purple-800 px-2 py-0.5 text-xs font-medium"
+      : status === "queued"
+      ? "inline-flex items-center rounded-full bg-violet-100 text-violet-800 px-2 py-0.5 text-xs font-medium"
+      : status === "failed"
+      ? "inline-flex items-center rounded-full bg-red-100 text-red-700 px-2 py-0.5 text-xs font-medium"
+      : "inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-xs font-medium";
+  return <span className={cls}>fine-tune {status}</span>;
+}
+
+function prettyJobError(message: string): string {
+  if (message.includes("Weights only load failed")) {
+    return "Model load failed due to PyTorch checkpoint compatibility. Retry after backend restart.";
+  }
+  return message.length > 180 ? `${message.slice(0, 180)}…` : message;
+}
+
 export default function JobsPage() {
   const navigate = useNavigate();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [models, setModels] = useState<CVModelRecord[]>([]);
+  const [loadError, setLoadError] = useState("");
 
   // ── form state ────────────────────────────────────────────────────────────
   const [name, setName] = useState("");
@@ -28,16 +48,33 @@ export default function JobsPage() {
   const [modelId, setModelId] = useState<number | "">("");
   const [selectedImages, setSelectedImages] = useState<Set<number>>(new Set());
   const [epsilon, setEpsilon] = useState(0.5);
-  const [numTiles, setNumTiles] = useState(1);
+  const [numTiles, setNumTiles] = useState(100);
   const [creating, setCreating] = useState(false);
+  const [deletingJobId, setDeletingJobId] = useState<number | null>(null);
   const [formError, setFormError] = useState("");
 
   useEffect(() => {
-    Promise.all([listJobs(), listImages(), listModels()]).then(([j, i, m]) => {
-      setJobs(j);
-      setImages(i);
-      setModels(m);
-    });
+    let cancelled = false;
+    async function loadAll() {
+      try {
+        const [j, i, m] = await Promise.all([listJobs(), listImages(), listModels()]);
+        if (cancelled) return;
+        setJobs(j);
+        setImages(i);
+        setModels(m);
+        setLoadError("");
+      } catch (e) {
+        if (cancelled) return;
+        // Keep the last successful data on screen; only report transient load failure.
+        setLoadError(String(e));
+      }
+    }
+    loadAll();
+    const timer = window.setInterval(loadAll, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   function toggleImage(id: number) {
@@ -72,6 +109,20 @@ export default function JobsPage() {
     }
   }
 
+  async function handleDelete(job: Job) {
+    const ok = window.confirm(`Delete job "${job.name}"? This cannot be undone.`);
+    if (!ok) return;
+    setDeletingJobId(job.id);
+    try {
+      await deleteJob(job.id);
+      setJobs((prev) => prev.filter((j) => j.id !== job.id));
+    } catch (err) {
+      setFormError(String(err));
+    } finally {
+      setDeletingJobId(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-bold text-gray-900">Jobs</h1>
@@ -94,7 +145,19 @@ export default function JobsPage() {
                     <p className="text-xs text-gray-400 mt-0.5 truncate">{j.description}</p>
                   )}
                   {j.status === "error" && j.error_message && (
-                    <p className="text-xs text-red-500 mt-0.5">{j.error_message}</p>
+                    <p className="text-xs text-red-500 mt-0.5" title={j.error_message}>
+                      {prettyJobError(j.error_message)}
+                    </p>
+                  )}
+                  {j.yolo_finetune_status !== "idle" && (
+                    <p className="text-xs text-blue-600 mt-0.5 flex items-center gap-2 flex-wrap">
+                      <FineTuneBadge status={j.yolo_finetune_status} />
+                      <span>
+                        YOLO fine-tune: {j.yolo_finetune_status}
+                        {(j.yolo_finetune_status === "queued" || j.yolo_finetune_status === "running") && " (model training in progress)"}
+                      </span>
+                      {j.yolo_finetune_error ? ` (${j.yolo_finetune_error})` : ""}
+                    </p>
                   )}
                 </div>
                 <div className="flex items-center gap-3 shrink-0 mt-0.5">
@@ -109,6 +172,14 @@ export default function JobsPage() {
                       Label
                     </Link>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(j)}
+                    disabled={deletingJobId === j.id}
+                    className="btn-secondary py-1 text-xs text-red-600 border-red-200 hover:bg-red-50"
+                  >
+                    {deletingJobId === j.id ? "Deleting…" : "Delete"}
+                  </button>
                 </div>
               </li>
             ))}
@@ -119,6 +190,12 @@ export default function JobsPage() {
       {/* ── Create new job ── */}
       <div className="card">
         <h2 className="font-semibold text-gray-800 mb-4">Create new job</h2>
+
+        {loadError && (
+          <p className="text-xs text-amber-600 mb-3">
+            Live refresh temporarily failed. Showing last known jobs state.
+          </p>
+        )}
 
         {models.length === 0 && (
           <p className="text-sm text-amber-600 mb-3">

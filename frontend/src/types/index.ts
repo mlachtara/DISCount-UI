@@ -36,6 +36,10 @@ export interface Job {
   error_message: string | null;
   total_tiles: number;
   labeled_tiles: number;
+  yolo_finetune_status: "idle" | "queued" | "running" | "failed";
+  yolo_finetune_error: string | null;
+  yolo_last_trained_bbox_count: number;
+  yolo_latest_model_id: number | null;
 }
 
 export interface Tile {
@@ -68,6 +72,37 @@ export interface Label {
   job_id: number;
   f_count: number;
   labeled_at: string;
+}
+
+export interface BBox {
+  id: number;
+  job_id: number;
+  tile_id: number;
+  class_id: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  annotated_at: string;
+}
+
+export interface BBoxIn {
+  class_id: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+export interface FineTuneStatus {
+  job_id: number;
+  model_kind: string;
+  status: "idle" | "queued" | "running" | "failed";
+  last_trained_bbox_count: number;
+  current_bbox_tile_count: number;
+  next_auto_train_at: number;
+  latest_model_id: number | null;
+  error: string | null;
 }
 
 export interface EstimateOut {

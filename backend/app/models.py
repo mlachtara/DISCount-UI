@@ -91,16 +91,25 @@ class Job(Base):
     # Job status values: "created" | "processing" | "ready" | "error"
     status = Column(String, default="created", nullable=False)
     epsilon = Column(Float, default=0.5)  # minimum floor for g(s): g(s) = max(raw_count, epsilon)
-    num_tiles = Column(Integer, default=1)  # target number of sub-tiles to split each image into
+    num_tiles = Column(Integer, default=100)  # target number of sub-tiles to split each image into
+    # YOLO fine-tuning metadata (bbox-driven)
+    yolo_finetune_status = Column(String, default="idle", nullable=False)  # idle|queued|running|failed
+    yolo_finetune_error = Column(Text, nullable=True)
+    yolo_last_trained_bbox_count = Column(Integer, default=0, nullable=False)
+    yolo_latest_model_id = Column(Integer, ForeignKey("cv_models.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     error_message = Column(Text, nullable=True)
 
-    model = relationship("CVModel")
+    model = relationship("CVModel", foreign_keys=[model_id])
+    yolo_latest_model = relationship("CVModel", foreign_keys=[yolo_latest_model_id])
     images = relationship("UploadedImage", secondary="job_images")
     tiles = relationship("Tile", back_populates="job", cascade="all, delete-orphan")
     labels = relationship("Label", back_populates="job", cascade="all, delete-orphan")
     estimate_history = relationship(
         "EstimateHistory", back_populates="job", cascade="all, delete-orphan"
+    )
+    bbox_annotations = relationship(
+        "BBoxAnnotation", back_populates="job", cascade="all, delete-orphan"
     )
 
 
@@ -150,6 +159,26 @@ class Label(Base):
 
     tile = relationship("Tile", back_populates="label")
     job = relationship("Job", back_populates="labels")
+
+
+class BBoxAnnotation(Base):
+    """Human-provided YOLO fine-tuning annotation for one tile."""
+
+    __tablename__ = "bbox_annotations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    tile_id = Column(Integer, ForeignKey("tiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    class_id = Column(Integer, default=0, nullable=False)
+    # Normalized XYXY coordinates in [0,1] relative to tile image dimensions.
+    x1 = Column(Float, nullable=False)
+    y1 = Column(Float, nullable=False)
+    x2 = Column(Float, nullable=False)
+    y2 = Column(Float, nullable=False)
+    annotated_at = Column(DateTime, default=datetime.utcnow)
+
+    job = relationship("Job", back_populates="bbox_annotations")
+    tile = relationship("Tile")
 
 
 class EstimateHistory(Base):

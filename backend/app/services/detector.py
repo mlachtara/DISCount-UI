@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import math
+import os
 import tempfile
 from pathlib import Path
 
@@ -25,11 +26,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import Job, Tile, UploadedImage
+from app.models import BBoxAnnotation, CVModel, Job, Tile, UploadedImage
 from app.services import storage as storage_service
 
 log = logging.getLogger(__name__)
 settings = get_settings()
+
+# PyTorch 2.6 changed torch.load default to weights_only=True, which breaks
+# checkpoint formats used by Ultralytics and many research models.
+_orig_torch_load = torch.load
+
+
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_compat
 
 
 # ── Model cache (avoids reloading for each tile) ──────────────────────────────
@@ -43,10 +56,18 @@ def _load_yolo(model_blob_url: str):
     if cache_key not in _model_cache:
         try:
             from ultralytics import YOLO
+            from ultralytics.nn.tasks import DetectionModel
         except ImportError as e:
             raise RuntimeError(
                 "ultralytics is not installed. Run: pip install ultralytics"
             ) from e
+        # PyTorch 2.6 changed torch.load default to weights_only=True.
+        # Ultralytics checkpoints need full object loading.
+        os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+        try:
+            torch.serialization.add_safe_globals([DetectionModel])
+        except Exception:
+            pass
 
         if model_blob_url == "builtin://yolo_v8":
             # Built-in Ultralytics checkpoint.
@@ -117,13 +138,17 @@ def _load_csrnet(model_blob_url: str):
                     "CSRNet built-in selected but CSRNET_DEFAULT_WEIGHTS_PATH is not configured."
                 )
             weights_path = settings.csrnet_default_weights_path
-            state_dict = _extract_state_dict(torch.load(weights_path, map_location="cpu"))
+            state_dict = _extract_state_dict(
+                torch.load(weights_path, map_location="cpu", weights_only=False)
+            )
         else:
             model_bytes = storage_service.get_file_bytes(model_blob_url)
             with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as tmp:
                 tmp.write(model_bytes)
                 tmp_path = tmp.name
-            state_dict = _extract_state_dict(torch.load(tmp_path, map_location="cpu"))
+            state_dict = _extract_state_dict(
+                torch.load(tmp_path, map_location="cpu", weights_only=False)
+            )
             Path(tmp_path).unlink(missing_ok=True)
 
         model = _CSRNet()
@@ -155,7 +180,7 @@ def _load_faster_rcnn(model_blob_url: str):
             with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
                 tmp.write(model_bytes)
                 tmp_path = tmp.name
-            payload = torch.load(tmp_path, map_location="cpu")
+            payload = torch.load(tmp_path, map_location="cpu", weights_only=False)
             Path(tmp_path).unlink(missing_ok=True)
             state_dict = _extract_state_dict(payload)
             model.load_state_dict(state_dict, strict=False)
@@ -287,6 +312,7 @@ def _run_faster_rcnn_inference(frcnn_model, image_bytes: bytes) -> dict:
 # ── Main background task ──────────────────────────────────────────────────────
 
 _FLUSH_EVERY = 50  # flush the ORM session every N tiles to avoid unbounded memory growth
+FINE_TUNE_TRIGGER_EVERY = 20
 
 
 async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
@@ -424,7 +450,14 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
     except Exception as exc:
         log.exception("Detector failed for job %d", job_id)
         job.status = "error"
-        job.error_message = str(exc)
+        msg = str(exc)
+        if "Weights only load failed" in msg:
+            job.error_message = (
+                "Model checkpoint load failed due to PyTorch weights_only behavior. "
+                "The backend applies a compatibility patch; restart backend and retry the job."
+            )
+        else:
+            job.error_message = msg[:700]
         await db.commit()
 
 
@@ -449,3 +482,178 @@ def sample_next_tile(unlabeled_tiles: list[dict]) -> dict | None:
 
     idx = int(np.random.choice(len(unlabeled_tiles), p=probs))
     return unlabeled_tiles[idx]
+
+
+def _resolve_yolo_weights_path(model: CVModel) -> str:
+    if model.blob_url == "builtin://yolo_v8":
+        return "yolov8n.pt"
+    model_bytes = storage_service.get_file_bytes(model.blob_url)
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
+        tmp.write(model_bytes)
+        return tmp.name
+
+
+async def maybe_run_yolo_finetune(job_id: int, db: AsyncSession, train_every: int = FINE_TUNE_TRIGGER_EVERY) -> bool:
+    """
+    Run YOLO fine-tuning when enough new bbox-labeled tiles are available.
+    Returns True when a new fine-tuned model was produced.
+    """
+    from sqlalchemy import func
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        select(Job).where(Job.id == job_id).options(selectinload(Job.model))
+    )
+    job = result.scalar_one_or_none()
+    if job is None or job.model is None:
+        return False
+    if (job.model.model_kind or "yolo_v8") != "yolo_v8":
+        return False
+    if (job.yolo_finetune_status or "idle") == "running":
+        return False
+
+    bbox_tiles_result = await db.execute(
+        select(func.count(func.distinct(BBoxAnnotation.tile_id))).where(BBoxAnnotation.job_id == job_id)
+    )
+    bbox_tile_count = int(bbox_tiles_result.scalar() or 0)
+    trained_count = int(job.yolo_last_trained_bbox_count or 0)
+    if bbox_tile_count < max(train_every, trained_count + train_every):
+        return False
+
+    job.yolo_finetune_status = "running"
+    job.yolo_finetune_error = None
+    await db.commit()
+
+    base_weights_tmp: str | None = None
+    dataset_dir_obj: tempfile.TemporaryDirectory | None = None
+    train_dir_obj: tempfile.TemporaryDirectory | None = None
+    try:
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            raise RuntimeError("ultralytics is not installed. Run: pip install ultralytics") from e
+
+        # Collect bbox-labeled tiles and image paths.
+        rows = await db.execute(
+            select(Tile, BBoxAnnotation, UploadedImage)
+            .join(BBoxAnnotation, BBoxAnnotation.tile_id == Tile.id)
+            .join(UploadedImage, UploadedImage.id == Tile.image_id)
+            .where(Tile.job_id == job_id)
+            .order_by(Tile.id, BBoxAnnotation.id)
+        )
+        grouped: dict[int, dict] = {}
+        for tile, ann, image in rows.all():
+            if tile.id not in grouped:
+                grouped[tile.id] = {"tile": tile, "image": image, "boxes": []}
+            grouped[tile.id]["boxes"].append(ann)
+
+        if len(grouped) < 2:
+            raise RuntimeError("Need bbox labels on at least 2 tiles before fine-tuning.")
+
+        dataset_dir_obj = tempfile.TemporaryDirectory(prefix=f"yolo_ft_ds_{job_id}_")
+        train_dir_obj = tempfile.TemporaryDirectory(prefix=f"yolo_ft_out_{job_id}_")
+        dataset_dir = Path(dataset_dir_obj.name)
+        images_dir = dataset_dir / "images" / "train"
+        labels_dir = dataset_dir / "labels" / "train"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+        for tile_id, payload in grouped.items():
+            tile = payload["tile"]
+            image = payload["image"]
+            blob = tile.crop_blob_url or image.blob_url
+            if not blob:
+                continue
+            img_bytes = await asyncio.to_thread(storage_service.get_file_bytes, blob)
+            img = await asyncio.to_thread(
+                lambda b: PILImage.open(io.BytesIO(b)).convert("RGB"),
+                img_bytes,
+            )
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                continue
+            img_out = images_dir / f"{tile_id}.jpg"
+            await asyncio.to_thread(img.save, img_out, "JPEG", quality=95)
+            lbl_out = labels_dir / f"{tile_id}.txt"
+            lines = []
+            for b in payload["boxes"]:
+                x1 = max(0.0, min(1.0, float(b.x1)))
+                y1 = max(0.0, min(1.0, float(b.y1)))
+                x2 = max(0.0, min(1.0, float(b.x2)))
+                y2 = max(0.0, min(1.0, float(b.y2)))
+                bw = max(0.0, x2 - x1)
+                bh = max(0.0, y2 - y1)
+                cx = x1 + bw / 2.0
+                cy = y1 + bh / 2.0
+                if bw == 0 or bh == 0:
+                    continue
+                lines.append(f"{int(b.class_id)} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            lbl_out.write_text("\n".join(lines), encoding="utf-8")
+
+        dataset_yaml = dataset_dir / "dataset.yaml"
+        dataset_yaml.write_text(
+            (
+                f"path: {dataset_dir.as_posix()}\n"
+                "train: images/train\n"
+                "val: images/train\n"
+                "names:\n"
+                "  0: object\n"
+            ),
+            encoding="utf-8",
+        )
+
+        base_weights_tmp = _resolve_yolo_weights_path(job.model)
+        yolo = YOLO(base_weights_tmp)
+        results = await asyncio.to_thread(
+            yolo.train,
+            data=str(dataset_yaml),
+            epochs=5,
+            imgsz=640,
+            batch=8,
+            project=train_dir_obj.name,
+            name=f"job_{job_id}",
+            exist_ok=True,
+            verbose=False,
+        )
+        save_dir = Path(getattr(results, "save_dir", Path(train_dir_obj.name) / f"job_{job_id}"))
+        best_path = save_dir / "weights" / "best.pt"
+        final_path = best_path if best_path.exists() else save_dir / "weights" / "last.pt"
+        if not final_path.exists():
+            raise RuntimeError("Fine-tuning finished but no output checkpoint was found.")
+
+        out_bytes = final_path.read_bytes()
+        out_name = f"job{job_id}_ft_{int(asyncio.get_event_loop().time())}.pt"
+        stored_name, blob_url = storage_service.save_upload(out_bytes, out_name, "models")
+        new_model = CVModel(
+            user_id=job.user_id,
+            name=f"{job.model.name} (finetuned {bbox_tile_count} bbox tiles)",
+            model_kind="yolo_v8",
+            filename=stored_name,
+            blob_url=blob_url,
+            file_size=len(out_bytes),
+        )
+        db.add(new_model)
+        await db.flush()
+        job.yolo_latest_model_id = new_model.id
+        job.yolo_last_trained_bbox_count = bbox_tile_count
+        job.yolo_finetune_status = "idle"
+        job.yolo_finetune_error = None
+        await db.commit()
+        return True
+    except Exception as exc:
+        log.exception("YOLO fine-tuning failed for job %d", job_id)
+        job.yolo_finetune_status = "failed"
+        job.yolo_finetune_error = str(exc)
+        await db.commit()
+        return False
+    finally:
+        if base_weights_tmp and base_weights_tmp.endswith(".pt") and Path(base_weights_tmp).exists():
+            if "builtin://yolo_v8" != getattr(job.model, "blob_url", ""):
+                try:
+                    os.remove(base_weights_tmp)
+                except OSError:
+                    pass
+        if dataset_dir_obj:
+            dataset_dir_obj.cleanup()
+        if train_dir_obj:
+            train_dir_obj.cleanup()

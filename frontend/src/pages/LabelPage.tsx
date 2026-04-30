@@ -1,35 +1,40 @@
-/**
- * Core labeling interface.
- *
- * Tile image is shown with:
- *   • Yellow bounding boxes  — detector proposals (g(s))
- *   • Green numbered circles — click-points added by the labeler (f(s))
- *
- * Click anywhere on the image to add a count point.
- * Click an existing point to remove it.
- * The count input always reflects the current number of points;
- * typing a number directly clears the visual points and sets the raw count.
- */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getEstimateHistory, getJob, nextTile, submitLabel } from "../api/client";
+import {
+  getEstimateHistory,
+  getFineTuneStatus,
+  getJob,
+  listBBoxes,
+  nextTile,
+  submitBBoxes,
+  submitLabel,
+} from "../api/client";
 import EstimateChart from "../components/EstimateChart";
 import StdErrorChart from "../components/StdErrorChart";
-import type { Detection, EstimateHistoryPoint, EstimateOut, Job, Tile } from "../types";
-
-// ── Canvas drawing ────────────────────────────────────────────────────────────
+import type {
+  BBox,
+  BBoxIn,
+  Detection,
+  EstimateHistoryPoint,
+  EstimateOut,
+  FineTuneStatus,
+  Job,
+  Tile,
+} from "../types";
 
 interface Point {
-  x: number; // in natural image pixel coordinates, Cartesian
+  x: number;
   y: number;
 }
 
-function drawOverlay(
-  canvas: HTMLCanvasElement,
-  img: HTMLImageElement,
-  detections: Detection[],
-  points: Point[]
-) {
+interface Rect {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+function drawOverlay(canvas: HTMLCanvasElement, img: HTMLImageElement, detections: Detection[], points: Point[], boxes: Rect[]) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
@@ -55,7 +60,7 @@ function drawOverlay(
     ctx.fillText(label, d.x1 + 3, d.y1 - 4);
   }
 
-  // ── Human click-points (green numbered circles) ──
+  // Human click-points (count mode)
   const r = Math.max(7, canvas.width / 100);
   for (let i = 0; i < points.length; i++) {
     const { x, y } = points[i];
@@ -73,9 +78,14 @@ function drawOverlay(
     ctx.textBaseline = "middle";
     ctx.fillText(String(i + 1), x, y);
   }
-}
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+  // Human bbox annotations (fine-tune mode)
+  ctx.strokeStyle = "rgba(34, 197, 94, 0.95)";
+  ctx.lineWidth = lw;
+  for (const b of boxes) {
+    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+  }
+}
 
 export default function LabelPage() {
   const { jobId } = useParams<{ jobId: string }>();
@@ -88,23 +98,21 @@ export default function LabelPage() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
 
-  // ── Click-point state ──
+  const [labelMode, setLabelMode] = useState<"count" | "bbox">("count");
   const [points, setPoints] = useState<Point[]>([]);
-  // fCount tracks the authoritative count; driven by points or manual input
   const [fCount, setFCount] = useState<number | "">(0);
+  const [bboxes, setBboxes] = useState<Rect[]>([]);
+  const [draftBox, setDraftBox] = useState<Rect | null>(null);
+  const drawStartRef = useRef<Point | null>(null);
 
-  // ── Bounding box toggle ──
   const [showBoxes, setShowBoxes] = useState(false);
-
-  // ── Estimate / history ──
   const [estimate, setEstimate] = useState<EstimateOut | null>(null);
   const [history, setHistory] = useState<EstimateHistoryPoint[]>([]);
+  const [fineTuneStatus, setFineTuneStatus] = useState<FineTuneStatus | null>(null);
 
-  // ── Canvas / image refs ──
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
 
-  // Parse detections from current tile
   const detections: Detection[] = (() => {
     if (!tile) return [];
     try {
@@ -114,50 +122,40 @@ export default function LabelPage() {
     }
   })();
 
-  // ── Redraw canvas whenever points, tile, or box-visibility changes ──
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     const img = imgRef.current;
-
-    const hist= getEstimateHistory(job?.id ?? 0);
-    
-    Promise.resolve(hist).then((res) =>{
-            if(res.length > 0){
-              const lastEst = res[res.length -1];
-            setEstimate({
-              "estimate" : lastEst.estimate,
-              "job_id": id,
-              "n_labeled": lastEst.n_labeled,
-              "ci_lower" : lastEst.ci_lower,
-              "ci_upper" : lastEst.ci_upper,
-              "total_tiles" : job?.total_tiles ?? 1,
-              "std_error" : lastEst.std_error,
-              "g_total" : job?.epsilon ?? 1
-            });
-            }
-          })
-          
     if (!canvas || !img || !img.complete || !img.naturalWidth) return;
-    drawOverlay(canvas, img, showBoxes ? detections : [], points);
-  }, [tile?.id, points, showBoxes]); // detections derived from tile
+    const renderedBoxes = draftBox ? [...bboxes, draftBox] : bboxes;
+    drawOverlay(canvas, img, showBoxes ? detections : [], points, renderedBoxes);
+  }, [detections, points, bboxes, draftBox, showBoxes]);
 
   useEffect(() => {
     redraw();
   }, [redraw]);
 
-  // ── Initial load ──
   useEffect(() => {
     if (!id) return;
     getJob(id).then(setJob).catch((e) => setError(String(e)));
     loadNextTile();
     getEstimateHistory(id).then(setHistory);
+    getFineTuneStatus(id).then(setFineTuneStatus).catch(() => undefined);
+  }, [id]);
 
-    }, [id]);
+  useEffect(() => {
+    if (!id) return;
+    const timer = window.setInterval(() => {
+      getFineTuneStatus(id).then(setFineTuneStatus).catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [id]);
 
   async function loadNextTile() {
     setLoadingTile(true);
     setPoints([]);
     setFCount(0);
+    setBboxes([]);
+    setDraftBox(null);
     try {
       const t = await nextTile(id);
       if (!t) {
@@ -165,6 +163,19 @@ export default function LabelPage() {
         setTile(null);
       } else {
         setTile(t);
+        try {
+          const existing = await listBBoxes(id, t.id);
+          setBboxes(
+            existing.map((b: BBox) => ({
+              x1: b.x1,
+              y1: b.y1,
+              x2: b.x2,
+              y2: b.y2,
+            }))
+          );
+        } catch {
+          setBboxes([]);
+        }
       }
     } catch (e) {
       setError(String(e));
@@ -173,21 +184,20 @@ export default function LabelPage() {
     }
   }
 
-  // ── Canvas click handler ──
-  function handleCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
+  function canvasPoint(e: React.MouseEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current;
-    const img = imgRef.current;
-    if (!canvas || !img) return;
-
+    if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    // Map CSS pixels → natural image pixels
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY, scale: Math.max(scaleX, scaleY) };
+  }
 
-    // Hit radius scales with image size so it stays ~12 CSS px
-    const hitRadius = 12 * Math.max(scaleX, scaleY);
+  function handleCountCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    const p = canvasPoint(e);
+    if (!p) return;
+    const { x, y, scale } = p;
+    const hitRadius = 12 * scale;
     const nearIdx = points.findIndex(
       (p) => Math.hypot(p.x - x, p.y - y) <= hitRadius
     );
@@ -204,7 +214,43 @@ export default function LabelPage() {
     setFCount(next.length);
   }
 
-  // ── Manual count input ──
+  function handleBBoxMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+    const p = canvasPoint(e);
+    if (!p) return;
+    drawStartRef.current = { x: p.x, y: p.y };
+    setDraftBox({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
+  }
+
+  function handleBBoxMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (!drawStartRef.current) return;
+    const p = canvasPoint(e);
+    if (!p) return;
+    const s = drawStartRef.current;
+    setDraftBox({
+      x1: Math.min(s.x, p.x),
+      y1: Math.min(s.y, p.y),
+      x2: Math.max(s.x, p.x),
+      y2: Math.max(s.y, p.y),
+    });
+  }
+
+  function handleBBoxMouseUp() {
+    if (!draftBox) {
+      drawStartRef.current = null;
+      return;
+    }
+    const minSize = 4;
+    if (draftBox.x2 - draftBox.x1 >= minSize && draftBox.y2 - draftBox.y1 >= minSize) {
+      setBboxes((prev) => {
+        const next = [...prev, draftBox];
+        setFCount(next.length);
+        return next;
+      });
+    }
+    setDraftBox(null);
+    drawStartRef.current = null;
+  }
+
   function handleCountInput(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value;
     if (val === "") {
@@ -217,36 +263,64 @@ export default function LabelPage() {
     }
   }
 
-  // ── Submit label ──
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!tile || fCount === "") return;
+    if (!tile) return;
     setSubmitting(true);
     setError("");
     try {
-      const est = await submitLabel(id, tile.id, Number(fCount));
-      setEstimate(est);
-      setHistory((prev) => [
-        ...prev,
-        {
-          n_labeled: est.n_labeled,
-          estimate: est.estimate,
-          ci_lower: est.ci_lower,
-          ci_upper: est.ci_upper,
-          std_error: est.std_error,
-          computed_at: new Date().toISOString(),
-        },
-      ]);
+      if (labelMode === "count") {
+        if (fCount === "") return;
+        const est = await submitLabel(id, tile.id, Number(fCount));
+        setEstimate(est);
+        setHistory((prev) => [
+          ...prev,
+          {
+            n_labeled: est.n_labeled,
+            estimate: est.estimate,
+            ci_lower: est.ci_lower,
+            ci_upper: est.ci_upper,
+            std_error: est.std_error,
+            computed_at: new Date().toISOString(),
+          },
+        ]);
+        await loadNextTile();
+      } else {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const toSubmit: BBoxIn[] = bboxes.map((b) => ({
+          class_id: 0,
+          x1: Math.max(0, Math.min(1, b.x1 / canvas.width)),
+          y1: Math.max(0, Math.min(1, b.y1 / canvas.height)),
+          x2: Math.max(0, Math.min(1, b.x2 / canvas.width)),
+          y2: Math.max(0, Math.min(1, b.y2 / canvas.height)),
+        }));
+        await submitBBoxes(id, tile.id, toSubmit);
+        // Keep bbox and count modes aligned: a saved bbox set also submits
+        // the count label using number of boxes as f(s).
+        const est = await submitLabel(id, tile.id, bboxes.length);
+        setEstimate(est);
+        setHistory((prev) => [
+          ...prev,
+          {
+            n_labeled: est.n_labeled,
+            estimate: est.estimate,
+            ci_lower: est.ci_lower,
+            ci_upper: est.ci_upper,
+            std_error: est.std_error,
+            computed_at: new Date().toISOString(),
+          },
+        ]);
+        setFineTuneStatus(await getFineTuneStatus(id));
+        await loadNextTile();
+      }
       getJob(id).then(setJob);
-      await loadNextTile();
     } catch (e) {
       setError(String(e));
     } finally {
       setSubmitting(false);
     }
   }
-
-  // ── Render ────────────────────────────────────────────────────────────────
 
   if (!job && !error) return <p className="text-gray-500">Loading…</p>;
 
@@ -324,7 +398,11 @@ export default function LabelPage() {
                 <canvas
                   ref={canvasRef}
                   className="absolute inset-0 w-full h-full rounded cursor-crosshair"
-                  onClick={handleCanvasClick}
+                  onClick={labelMode === "count" ? handleCountCanvasClick : undefined}
+                  onMouseDown={labelMode === "bbox" ? handleBBoxMouseDown : undefined}
+                  onMouseMove={labelMode === "bbox" ? handleBBoxMouseMove : undefined}
+                  onMouseUp={labelMode === "bbox" ? handleBBoxMouseUp : undefined}
+                  onMouseLeave={labelMode === "bbox" ? handleBBoxMouseUp : undefined}
                 />
               </div>
             ) : null}
@@ -333,7 +411,9 @@ export default function LabelPage() {
           {/* Hint */}
           {tile && !loadingTile && !done && (
             <p className="text-xs text-gray-500 text-center">
-              Click the image to place a count marker · click an existing marker to remove it
+              {labelMode === "count"
+                ? "Click the image to place a count marker · click an existing marker to remove it"
+                : "Drag on image to create bounding boxes for YOLO fine-tuning"}
             </p>
           )}
 
@@ -355,6 +435,30 @@ export default function LabelPage() {
           {/* Count form */}
           {!done && (
             <form onSubmit={handleSubmit} className="card space-y-3">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className={`px-3 py-1.5 text-sm rounded border ${labelMode === "count" ? "bg-brand-50 border-brand-400 text-brand-700" : "bg-white border-gray-300 text-gray-600"}`}
+                  onClick={() => setLabelMode("count")}
+                >
+                  Count mode
+                </button>
+                <button
+                  type="button"
+                  className={`px-3 py-1.5 text-sm rounded border ${labelMode === "bbox" ? "bg-brand-50 border-brand-400 text-brand-700" : "bg-white border-gray-300 text-gray-600"}`}
+                  onClick={() => setLabelMode("bbox")}
+                >
+                  BBox mode (fine-tune)
+                </button>
+              </div>
+              {fineTuneStatus && (
+                <p className="text-xs text-gray-500">
+                  YOLO fine-tune: <span className="font-semibold">{fineTuneStatus.status}</span> ·
+                  bbox tiles {fineTuneStatus.current_bbox_tile_count}/{fineTuneStatus.next_auto_train_at}
+                  {fineTuneStatus.error ? ` · ${fineTuneStatus.error}` : ""}
+                </p>
+              )}
+              {labelMode === "count" ? (
               <div className="flex items-center gap-3">
                 <div className="flex-1">
                   <label className="block text-xs font-medium text-gray-600 mb-1">
@@ -414,6 +518,48 @@ export default function LabelPage() {
                   {submitting ? "Saving…" : "Submit →"}
                 </button>
               </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span>{bboxes.length} bbox annotation(s)</span>
+                    <span className="text-gray-500">Count from boxes: {bboxes.length}</span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className="btn-secondary py-1"
+                        onClick={() =>
+                          setBboxes((prev) => {
+                            const next = prev.slice(0, -1);
+                            setFCount(next.length);
+                            return next;
+                          })
+                        }
+                        disabled={submitting || bboxes.length === 0}
+                      >
+                        Undo
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary py-1"
+                        onClick={() => {
+                          setBboxes([]);
+                          setFCount(0);
+                        }}
+                        disabled={submitting || bboxes.length === 0}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    className="btn-primary"
+                    disabled={submitting || loadingTile}
+                  >
+                    {submitting ? "Saving…" : "Save bbox labels"}
+                  </button>
+                </div>
+              )}
 
               {error && <p className="text-sm text-red-600">{error}</p>}
             </form>

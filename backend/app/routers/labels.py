@@ -3,15 +3,23 @@
 """
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
-from app.database import get_db
-from app.models import EstimateHistory, Job, Label, Tile, User
-from app.schemas import EstimateOut, LabelCreate, LabelOut
+from app.database import AsyncSessionLocal, get_db
+from app.models import BBoxAnnotation, CVModel, EstimateHistory, Job, Label, Tile, User
+from app.schemas import (
+    BBoxOut,
+    BBoxSubmitRequest,
+    EstimateOut,
+    FineTuneStatusOut,
+    LabelCreate,
+    LabelOut,
+)
 from app.services.discount import compute_estimate
+from app.services import detector as detector_service
 
 router = APIRouter(prefix="/api/jobs", tags=["labels"])
 
@@ -86,6 +94,125 @@ async def list_labels(
     return [LabelOut.model_validate(l) for l in result.scalars()]
 
 
+@router.post("/{job_id}/bboxes", response_model=list[BBoxOut])
+async def submit_bboxes(
+    job_id: int,
+    body: BBoxSubmitRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Replace bbox annotations for one tile, optionally triggering YOLO fine-tuning."""
+    job_result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == current_user.id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    tile_result = await db.execute(
+        select(Tile).where(Tile.id == body.tile_id, Tile.job_id == job_id)
+    )
+    tile = tile_result.scalar_one_or_none()
+    if tile is None:
+        raise HTTPException(status_code=404, detail="Tile not found in this job")
+
+    await db.execute(
+        delete(BBoxAnnotation).where(
+            BBoxAnnotation.job_id == job_id,
+            BBoxAnnotation.tile_id == body.tile_id,
+        )
+    )
+    for box in body.boxes:
+        if box.x2 <= box.x1 or box.y2 <= box.y1:
+            raise HTTPException(status_code=422, detail="Each bbox must have x2>x1 and y2>y1.")
+        db.add(
+            BBoxAnnotation(
+                job_id=job_id,
+                tile_id=body.tile_id,
+                class_id=box.class_id,
+                x1=box.x1,
+                y1=box.y1,
+                x2=box.x2,
+                y2=box.y2,
+            )
+        )
+    await db.commit()
+
+    model_result = await db.execute(select(CVModel).where(CVModel.id == job.model_id))
+    model = model_result.scalar_one_or_none()
+    if (model.model_kind if model else "yolo_v8") == "yolo_v8":
+        # Mark queued quickly; the background task will move to running/failed/idle.
+        job.yolo_finetune_status = "queued"
+        job.yolo_finetune_error = None
+        await db.commit()
+        background_tasks.add_task(_run_yolo_finetune_background, job_id)
+
+    result = await db.execute(
+        select(BBoxAnnotation)
+        .where(BBoxAnnotation.job_id == job_id, BBoxAnnotation.tile_id == body.tile_id)
+        .order_by(BBoxAnnotation.id.asc())
+    )
+    return [BBoxOut.model_validate(r) for r in result.scalars()]
+
+
+@router.get("/{job_id}/bboxes/{tile_id}", response_model=list[BBoxOut])
+async def list_bboxes_for_tile(
+    job_id: int,
+    tile_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job_result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == current_user.id)
+    )
+    if job_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = await db.execute(
+        select(BBoxAnnotation)
+        .where(BBoxAnnotation.job_id == job_id, BBoxAnnotation.tile_id == tile_id)
+        .order_by(BBoxAnnotation.id.asc())
+    )
+    return [BBoxOut.model_validate(r) for r in result.scalars()]
+
+
+@router.get("/{job_id}/finetune-status", response_model=FineTuneStatusOut)
+async def get_finetune_status(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job_result = await db.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == current_user.id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    model_kind = "yolo_v8"
+    if job.model_id:
+        model_result = await db.execute(select(CVModel).where(CVModel.id == job.model_id))
+        model = model_result.scalar_one_or_none()
+        if model is not None:
+            model_kind = model.model_kind or "yolo_v8"
+    bbox_tiles_result = await db.execute(
+        select(func.count(func.distinct(BBoxAnnotation.tile_id))).where(BBoxAnnotation.job_id == job_id)
+    )
+    current_bbox_tile_count = int(bbox_tiles_result.scalar() or 0)
+    last = int(job.yolo_last_trained_bbox_count or 0)
+    next_auto = max(detector_service.FINE_TUNE_TRIGGER_EVERY, last + detector_service.FINE_TUNE_TRIGGER_EVERY)
+    return FineTuneStatusOut(
+        job_id=job_id,
+        model_kind=model_kind,
+        status=job.yolo_finetune_status or "idle",
+        last_trained_bbox_count=last,
+        current_bbox_tile_count=current_bbox_tile_count,
+        next_auto_train_at=next_auto,
+        latest_model_id=job.yolo_latest_model_id,
+        error=job.yolo_finetune_error,
+    )
+
+
 # ── Estimate helpers ──────────────────────────────────────────────────────────
 
 async def _recompute_and_store(job_id: int, db: AsyncSession) -> EstimateOut:
@@ -127,3 +254,8 @@ async def _recompute_and_store(job_id: int, db: AsyncSession) -> EstimateOut:
         std_error=est.std_error,
         g_total=est.g_total,
     )
+
+
+async def _run_yolo_finetune_background(job_id: int) -> None:
+    async with AsyncSessionLocal() as db:
+        await detector_service.maybe_run_yolo_finetune(job_id, db)

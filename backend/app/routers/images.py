@@ -16,7 +16,7 @@ from app.services import storage as storage_service
 router = APIRouter(prefix="/api/images", tags=["images"])
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
-MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_MB = 150
 
 
 @router.post("/upload", response_model=list[ImageOut])

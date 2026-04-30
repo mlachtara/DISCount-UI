@@ -68,6 +68,11 @@ async def _run_migrations() -> None:
         "ALTER TABLE jobs            ADD COLUMN user_id INTEGER REFERENCES users(id)",
         # Detector family metadata
         "ALTER TABLE cv_models       ADD COLUMN model_kind VARCHAR DEFAULT 'yolo_v8'",
+        # YOLO fine-tuning metadata
+        "ALTER TABLE jobs            ADD COLUMN yolo_finetune_status VARCHAR DEFAULT 'idle'",
+        "ALTER TABLE jobs            ADD COLUMN yolo_finetune_error TEXT",
+        "ALTER TABLE jobs            ADD COLUMN yolo_last_trained_bbox_count INTEGER DEFAULT 0",
+        "ALTER TABLE jobs            ADD COLUMN yolo_latest_model_id INTEGER REFERENCES cv_models(id)",
     ]
     async with engine.begin() as conn:
         for stmt in new_columns:
@@ -75,6 +80,37 @@ async def _run_migrations() -> None:
                 await conn.execute(__import__("sqlalchemy").text(stmt))
             except Exception:
                 pass  # column already exists — skip
+        # New table for bbox annotations used by auto fine-tuning.
+        try:
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    """
+                    CREATE TABLE IF NOT EXISTS bbox_annotations (
+                        id INTEGER PRIMARY KEY,
+                        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                        tile_id INTEGER NOT NULL REFERENCES tiles(id) ON DELETE CASCADE,
+                        class_id INTEGER NOT NULL DEFAULT 0,
+                        x1 FLOAT NOT NULL,
+                        y1 FLOAT NOT NULL,
+                        x2 FLOAT NOT NULL,
+                        y2 FLOAT NOT NULL,
+                        annotated_at DATETIME
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE INDEX IF NOT EXISTS ix_bbox_annotations_job_id ON bbox_annotations(job_id)"
+                )
+            )
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "CREATE INDEX IF NOT EXISTS ix_bbox_annotations_tile_id ON bbox_annotations(tile_id)"
+                )
+            )
+        except Exception:
+            pass
 
 
 @app.on_event("startup")

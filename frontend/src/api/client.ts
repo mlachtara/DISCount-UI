@@ -3,9 +3,12 @@
  * All functions use the native fetch API proxied through Vite to FastAPI.
  */
 import type {
+  BBox,
+  BBoxIn,
   CVModelRecord,
   EstimateHistoryPoint,
   EstimateOut,
+  FineTuneStatus,
   ImageRecord,
   Job,
   Label,
@@ -112,6 +115,14 @@ export async function getJob(id: number): Promise<Job> {
   return json(await fetch(`${BASE}/jobs/${id}`));
 }
 
+export async function deleteJob(id: number): Promise<void> {
+  const res = await fetch(`${BASE}/jobs/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`${res.status}: ${text}`);
+  }
+}
+
 export async function listTiles(jobId: number): Promise<Tile[]> {
   return json(await fetch(`${BASE}/jobs/${jobId}/tiles`));
 }
@@ -138,6 +149,28 @@ export async function submitLabel(
 
 export async function listLabels(jobId: number): Promise<Label[]> {
   return json(await fetch(`${BASE}/jobs/${jobId}/labels`));
+}
+
+export async function submitBBoxes(
+  jobId: number,
+  tileId: number,
+  boxes: BBoxIn[]
+): Promise<BBox[]> {
+  return json(
+    await fetch(`${BASE}/jobs/${jobId}/bboxes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tile_id: tileId, boxes }),
+    })
+  );
+}
+
+export async function listBBoxes(jobId: number, tileId: number): Promise<BBox[]> {
+  return json(await fetch(`${BASE}/jobs/${jobId}/bboxes/${tileId}`));
+}
+
+export async function getFineTuneStatus(jobId: number): Promise<FineTuneStatus> {
+  return json(await fetch(`${BASE}/jobs/${jobId}/finetune-status`));
 }
 
 // ── Estimates ─────────────────────────────────────────────────────────────────

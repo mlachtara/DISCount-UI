@@ -77,7 +77,7 @@ class JobCreate(BaseModel):
     model_id: int
     image_ids: list[int]
     epsilon: float = 0.5
-    num_tiles: int = 1  # target number of sub-tiles to split each image into (1 = no tiling)
+    num_tiles: int = 100  # target number of sub-tiles to split each image into
 
 
 class JobOut(BaseModel):
@@ -91,6 +91,10 @@ class JobOut(BaseModel):
     error_message: Optional[str]
     total_tiles: int = 0
     labeled_tiles: int = 0
+    yolo_finetune_status: str = "idle"
+    yolo_finetune_error: Optional[str] = None
+    yolo_last_trained_bbox_count: int = 0
+    yolo_latest_model_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -129,6 +133,51 @@ class LabelOut(BaseModel):
     labeled_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class BBoxIn(BaseModel):
+    class_id: int = 0
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+    @field_validator("x1", "y1", "x2", "y2")
+    @classmethod
+    def normalized_bounds(cls, v: float) -> float:
+        if v < 0 or v > 1:
+            raise ValueError("bbox coordinates must be normalized to [0, 1]")
+        return v
+
+
+class BBoxSubmitRequest(BaseModel):
+    tile_id: int
+    boxes: list[BBoxIn]
+
+
+class BBoxOut(BaseModel):
+    id: int
+    job_id: int
+    tile_id: int
+    class_id: int
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    annotated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FineTuneStatusOut(BaseModel):
+    job_id: int
+    model_kind: str
+    status: str
+    last_trained_bbox_count: int
+    current_bbox_tile_count: int
+    next_auto_train_at: int
+    latest_model_id: Optional[int]
+    error: Optional[str]
 
 
 # ── Estimate ──────────────────────────────────────────────────────────────────

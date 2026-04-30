@@ -144,7 +144,7 @@ def _infer_model_kind(filename: str, data: bytes) -> str:
             with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
                 tmp.write(data)
                 tmp_path = tmp.name
-            payload = torch.load(tmp_path, map_location="cpu")
+            payload = torch.load(tmp_path, map_location="cpu", weights_only=False)
         except Exception:
             # If inspection fails, default to YOLO for .pt (most common case).
             return MODEL_KIND_YOLO
