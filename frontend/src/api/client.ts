@@ -69,9 +69,14 @@ export async function listImages(): Promise<ImageRecord[]> {
 
 // ── Models ────────────────────────────────────────────────────────────────────
 
-export async function uploadModel(name: string, file: File): Promise<CVModelRecord> {
+export async function uploadModel(
+  name: string,
+  modelKind: "auto" | "yolo_v8" | "csrnet" | "faster_rcnn",
+  file: File
+): Promise<CVModelRecord> {
   const form = new FormData();
   form.append("name", name);
+  form.append("model_kind", modelKind);
   form.append("file", file);
   return json(await fetch(`${BASE}/models/upload`, { method: "POST", body: form }));
 }

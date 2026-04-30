@@ -167,10 +167,13 @@ export default function JobsPage() {
                 <option value="">— select model —</option>
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name}
+                    {m.name} [{m.model_kind === "csrnet" ? "CSRNet" : m.model_kind === "faster_rcnn" ? "Faster R-CNN" : "YOLO-v8"}]
                   </option>
                 ))}
               </select>
+              <p className="text-xs text-gray-400 mt-1">
+                Choose a built-in detector (YOLO-v8/CSRNet/Faster R-CNN) or one you uploaded.
+              </p>
             </div>
           </div>
 

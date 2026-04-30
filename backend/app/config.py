@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Detector
     detector_confidence: float = 0.2
     detector_epsilon: float = 0.5
+    csrnet_default_weights_path: str = ""
 
     # Auth — change this to a long random string in production
     secret_key: str = "change-me-in-production-use-a-long-random-string"

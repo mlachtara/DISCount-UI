@@ -21,3 +21,4 @@ python-jose[cryptography]==3.3.0
 # ultralytics installs torch automatically; pin to a CPU-only wheel for servers
 # without a GPU. Comment out and install separately if you already have a GPU env.
 ultralytics==8.2.24
+torchvision>=0.18.0

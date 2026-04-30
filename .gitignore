@@ -220,4 +220,6 @@ frontend/.env
 # Model files (large binaries — commit with Git LFS if needed)
 *.pt
 *.pth
+*.pth.tar
 *.onnx
+backend/weights/

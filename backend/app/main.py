@@ -66,6 +66,8 @@ async def _run_migrations() -> None:
         "ALTER TABLE uploaded_images ADD COLUMN user_id INTEGER REFERENCES users(id)",
         "ALTER TABLE cv_models       ADD COLUMN user_id INTEGER REFERENCES users(id)",
         "ALTER TABLE jobs            ADD COLUMN user_id INTEGER REFERENCES users(id)",
+        # Detector family metadata
+        "ALTER TABLE cv_models       ADD COLUMN model_kind VARCHAR DEFAULT 'yolo_v8'",
     ]
     async with engine.begin() as conn:
         for stmt in new_columns:

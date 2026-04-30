@@ -56,6 +56,8 @@ class CVModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     name = Column(String, nullable=False)
+    # "yolo_v8" | "csrnet"
+    model_kind = Column(String, nullable=False, default="yolo_v8")
     filename = Column(String, nullable=False)
     blob_url = Column(String, nullable=False)
     file_size = Column(Integer, nullable=True)

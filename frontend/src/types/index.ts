@@ -18,6 +18,7 @@ export interface ImageRecord {
 export interface CVModelRecord {
   id: number;
   name: string;
+  model_kind: "yolo_v8" | "csrnet" | "faster_rcnn";
   filename: string;
   original_filename: string;
   file_size: number | null;

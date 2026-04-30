@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 
 from PIL import Image as PILImage
+import torch
+import torch.nn as nn
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,12 +34,13 @@ settings = get_settings()
 
 # ── Model cache (avoids reloading for each tile) ──────────────────────────────
 
-_model_cache: dict[str, object] = {}  # blob_url → ultralytics YOLO instance
+_model_cache: dict[str, object] = {}  # "{kind}:{blob_url}" -> model instance
 
 
 def _load_yolo(model_blob_url: str):
     """Load and cache a YOLO model from its stored path/URL."""
-    if model_blob_url not in _model_cache:
+    cache_key = f"yolo_v8:{model_blob_url}"
+    if cache_key not in _model_cache:
         try:
             from ultralytics import YOLO
         except ImportError as e:
@@ -45,15 +48,121 @@ def _load_yolo(model_blob_url: str):
                 "ultralytics is not installed. Run: pip install ultralytics"
             ) from e
 
+        if model_blob_url == "builtin://yolo_v8":
+            # Built-in Ultralytics checkpoint.
+            _model_cache[cache_key] = YOLO("yolov8n.pt")
+            return _model_cache[cache_key]
+
         model_bytes = storage_service.get_file_bytes(model_blob_url)
         with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
             tmp.write(model_bytes)
             tmp_path = tmp.name
 
-        _model_cache[model_blob_url] = YOLO(tmp_path)
+        _model_cache[cache_key] = YOLO(tmp_path)
         Path(tmp_path).unlink(missing_ok=True)
 
-    return _model_cache[model_blob_url]
+    return _model_cache[cache_key]
+
+
+def _make_layers(cfg, in_channels=3, dilation=False):
+    d_rate = 2 if dilation else 1
+    layers = []
+    for v in cfg:
+        if v == "M":
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+        else:
+            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=d_rate, dilation=d_rate)
+            layers += [conv2d, nn.ReLU(inplace=True)]
+            in_channels = v
+    return nn.Sequential(*layers)
+
+
+class _CSRNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.frontend = _make_layers(
+            [64, 64, "M", 128, 128, "M", 256, 256, 256, "M", 512, 512, 512]
+        )
+        self.backend = _make_layers([512, 512, 512, 256, 128, 64], in_channels=512, dilation=True)
+        self.output_layer = nn.Conv2d(64, 1, kernel_size=1)
+
+    def forward(self, x):
+        x = self.frontend(x)
+        x = self.backend(x)
+        x = self.output_layer(x)
+        return x
+
+
+def _extract_state_dict(payload) -> dict:
+    if isinstance(payload, dict):
+        if "state_dict" in payload and isinstance(payload["state_dict"], dict):
+            payload = payload["state_dict"]
+        elif "model" in payload and isinstance(payload["model"], dict):
+            payload = payload["model"]
+    if not isinstance(payload, dict):
+        raise RuntimeError("CSRNet weights file does not contain a state dict.")
+    cleaned = {}
+    for key, value in payload.items():
+        new_key = key[7:] if key.startswith("module.") else key
+        cleaned[new_key] = value
+    return cleaned
+
+
+def _load_csrnet(model_blob_url: str):
+    cache_key = f"csrnet:{model_blob_url}"
+    if cache_key not in _model_cache:
+        if model_blob_url == "builtin://csrnet":
+            if not settings.csrnet_default_weights_path:
+                raise RuntimeError(
+                    "CSRNet built-in selected but CSRNET_DEFAULT_WEIGHTS_PATH is not configured."
+                )
+            weights_path = settings.csrnet_default_weights_path
+            state_dict = _extract_state_dict(torch.load(weights_path, map_location="cpu"))
+        else:
+            model_bytes = storage_service.get_file_bytes(model_blob_url)
+            with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as tmp:
+                tmp.write(model_bytes)
+                tmp_path = tmp.name
+            state_dict = _extract_state_dict(torch.load(tmp_path, map_location="cpu"))
+            Path(tmp_path).unlink(missing_ok=True)
+
+        model = _CSRNet()
+        model.load_state_dict(state_dict, strict=False)
+        model.eval()
+        _model_cache[cache_key] = model
+    return _model_cache[cache_key]
+
+
+def _load_faster_rcnn(model_blob_url: str):
+    cache_key = f"faster_rcnn:{model_blob_url}"
+    if cache_key not in _model_cache:
+        try:
+            from torchvision.models.detection import (
+                FasterRCNN_ResNet50_FPN_Weights,
+                fasterrcnn_resnet50_fpn,
+            )
+        except ImportError as e:
+            raise RuntimeError(
+                "torchvision is not installed. Run: pip install torchvision"
+            ) from e
+
+        if model_blob_url == "builtin://faster_rcnn":
+            weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT
+            model = fasterrcnn_resnet50_fpn(weights=weights)
+        else:
+            model = fasterrcnn_resnet50_fpn(weights=None, weights_backbone=None)
+            model_bytes = storage_service.get_file_bytes(model_blob_url)
+            with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
+                tmp.write(model_bytes)
+                tmp_path = tmp.name
+            payload = torch.load(tmp_path, map_location="cpu")
+            Path(tmp_path).unlink(missing_ok=True)
+            state_dict = _extract_state_dict(payload)
+            model.load_state_dict(state_dict, strict=False)
+
+        model.eval()
+        _model_cache[cache_key] = model
+    return _model_cache[cache_key]
 
 
 # ── Tiling helpers ────────────────────────────────────────────────────────────
@@ -130,6 +239,51 @@ def _run_inference(yolo_model, image_bytes: bytes) -> dict:
     return {"count": len(detections), "detections": detections}
 
 
+def _run_csrnet_inference(csrnet_model, image_bytes: bytes) -> dict:
+    import numpy as np
+
+    img = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
+    arr = np.asarray(img, dtype="float32") / 255.0
+    tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+    with torch.no_grad():
+        density = csrnet_model(tensor)
+        count = float(density.sum().item())
+    return {"count": max(count, 0.0), "detections": []}
+
+
+def _run_faster_rcnn_inference(frcnn_model, image_bytes: bytes) -> dict:
+    import numpy as np
+
+    img = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
+    arr = np.asarray(img, dtype="float32") / 255.0
+    tensor = torch.from_numpy(arr).permute(2, 0, 1)
+    with torch.no_grad():
+        out = frcnn_model([tensor])[0]
+
+    detections = []
+    boxes = out.get("boxes")
+    scores = out.get("scores")
+    labels = out.get("labels")
+    if boxes is not None and scores is not None and labels is not None:
+        conf_thresh = float(settings.detector_confidence)
+        for i in range(len(scores)):
+            score = float(scores[i].item())
+            if score < conf_thresh:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in boxes[i].tolist()]
+            detections.append(
+                {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "confidence": score,
+                    "class_id": int(labels[i].item()),
+                }
+            )
+    return {"count": len(detections), "detections": detections}
+
+
 # ── Main background task ──────────────────────────────────────────────────────
 
 _FLUSH_EVERY = 50  # flush the ORM session every N tiles to avoid unbounded memory growth
@@ -157,8 +311,13 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
         return
 
     try:
-        # _load_yolo is blocking (disk I/O + PyTorch model load) — run off-thread
-        yolo = await asyncio.to_thread(_load_yolo, job.model.blob_url)
+        model_kind = (getattr(job.model, "model_kind", None) or "yolo_v8").lower()
+        if model_kind == "csrnet":
+            detector_model = await asyncio.to_thread(_load_csrnet, job.model.blob_url)
+        elif model_kind == "faster_rcnn":
+            detector_model = await asyncio.to_thread(_load_faster_rcnn, job.model.blob_url)
+        else:
+            detector_model = await asyncio.to_thread(_load_yolo, job.model.blob_url)
         epsilon = job.epsilon
 
         # Load images via a direct join rather than the ORM relationship to avoid
@@ -184,7 +343,14 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
 
             if not tiling:
                 # ── No tiling: run detector on the full image ──
-                inference = await asyncio.to_thread(_run_inference, yolo, image_bytes)
+                infer_fn = (
+                    _run_csrnet_inference
+                    if model_kind == "csrnet"
+                    else _run_faster_rcnn_inference
+                    if model_kind == "faster_rcnn"
+                    else _run_inference
+                )
+                inference = await asyncio.to_thread(infer_fn, detector_model, image_bytes)
                 g_raw = float(inference["count"])
                 g_with_eps = max(g_raw, epsilon)
                 tile = Tile(
@@ -213,7 +379,14 @@ async def run_detector_for_job(job_id: int, db: AsyncSession) -> None:
                         crop_bytes = await asyncio.to_thread(
                             _crop_tile, pil_img, row, col, grid_rows, grid_cols
                         )
-                        inference = await asyncio.to_thread(_run_inference, yolo, crop_bytes)
+                        infer_fn = (
+                            _run_csrnet_inference
+                            if model_kind == "csrnet"
+                            else _run_faster_rcnn_inference
+                            if model_kind == "faster_rcnn"
+                            else _run_inference
+                        )
+                        inference = await asyncio.to_thread(infer_fn, detector_model, crop_bytes)
                         g_raw = float(inference["count"])
                         g_with_eps = max(g_raw, epsilon)
 

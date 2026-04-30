@@ -60,6 +60,7 @@ class ImageOut(BaseModel):
 class CVModelOut(BaseModel):
     id: int
     name: str
+    model_kind: str = "yolo_v8"
     original_filename: str = ""
     filename: str
     file_size: Optional[int]
