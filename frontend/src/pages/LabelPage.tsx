@@ -224,7 +224,7 @@ export default function LabelPage() {
     setSubmitting(true);
     setError("");
     try {
-      const est = await submitLabel(id, tile.id, Number(fCount));
+      const est = await submitLabel(id, tile.id, Number(fCount), points);
       setEstimate(est);
       setHistory((prev) => [
         ...prev,

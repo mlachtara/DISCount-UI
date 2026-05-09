@@ -120,13 +120,14 @@ export async function nextTile(jobId: number): Promise<Tile | null> {
 export async function submitLabel(
   jobId: number,
   tileId: number,
-  fCount: number
+  fCount: number,
+  points: { x: number; y: number }[] = []
 ): Promise<EstimateOut> {
   return json(
     await fetch(`${BASE}/jobs/${jobId}/labels`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tile_id: tileId, f_count: fCount }),
+      body: JSON.stringify({ tile_id: tileId, f_count: fCount, points }),
     })
   );
 }

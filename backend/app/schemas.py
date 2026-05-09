@@ -115,9 +115,15 @@ class TileOut(BaseModel):
 
 # ── Label ─────────────────────────────────────────────────────────────────────
 
+class LabelPointIn(BaseModel):
+    x: float
+    y: float
+
+
 class LabelCreate(BaseModel):
     tile_id: int
     f_count: int
+    points: list[LabelPointIn] = []
 
 
 class LabelOut(BaseModel):
@@ -125,6 +131,7 @@ class LabelOut(BaseModel):
     tile_id: int
     job_id: int
     f_count: int
+    label_points_json: str  # JSON-encoded list of {x, y} in tile-pixel coordinates
     labeled_at: datetime
 
     model_config = {"from_attributes": True}

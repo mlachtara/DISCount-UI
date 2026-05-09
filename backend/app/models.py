@@ -144,6 +144,8 @@ class Label(Base):
     tile_id = Column(Integer, ForeignKey("tiles.id", ondelete="CASCADE"), nullable=False)
     job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
     f_count = Column(Integer, nullable=False)  # human-provided count
+    # JSON array of {x, y} click-points in tile-pixel coordinates; "[]" when user typed count directly
+    label_points_json = Column(Text, default="[]", nullable=False)
     labeled_at = Column(DateTime, default=datetime.utcnow)
 
     tile = relationship("Tile", back_populates="label")
