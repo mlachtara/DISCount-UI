@@ -61,11 +61,17 @@ export interface Detection {
   class_id: number;
 }
 
+export interface LabelPoint {
+  x: number;
+  y: number;
+}
+
 export interface Label {
   id: number;
   tile_id: number;
   job_id: number;
   f_count: number;
+  label_points_json: string;  // JSON-encoded LabelPoint[] in tile-pixel coordinates
   labeled_at: string;
 }
 

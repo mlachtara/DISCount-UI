@@ -1,6 +1,7 @@
 """
 /api/jobs/{job_id}/labels — submit a human label and retrieve the updated estimate.
 """
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,16 +46,24 @@ async def submit_label(
     if body.f_count < 0:
         raise HTTPException(status_code=422, detail="f_count must be ≥ 0")
 
+    points_json = json.dumps([{"x": p.x, "y": p.y} for p in body.points])
+
     # Upsert label (allow correction of an existing label)
     existing = await db.execute(
         select(Label).where(Label.tile_id == body.tile_id)
     )
     label = existing.scalar_one_or_none()
     if label is None:
-        label = Label(tile_id=body.tile_id, job_id=job_id, f_count=body.f_count)
+        label = Label(
+            tile_id=body.tile_id,
+            job_id=job_id,
+            f_count=body.f_count,
+            label_points_json=points_json,
+        )
         db.add(label)
     else:
         label.f_count = body.f_count
+        label.label_points_json = points_json
         label.labeled_at = datetime.utcnow()
 
     await db.flush()

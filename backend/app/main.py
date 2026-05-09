@@ -66,6 +66,8 @@ async def _run_migrations() -> None:
         "ALTER TABLE uploaded_images ADD COLUMN user_id INTEGER REFERENCES users(id)",
         "ALTER TABLE cv_models       ADD COLUMN user_id INTEGER REFERENCES users(id)",
         "ALTER TABLE jobs            ADD COLUMN user_id INTEGER REFERENCES users(id)",
+        # Label coordinates
+        "ALTER TABLE labels ADD COLUMN label_points_json TEXT NOT NULL DEFAULT '[]'",
     ]
     async with engine.begin() as conn:
         for stmt in new_columns:
